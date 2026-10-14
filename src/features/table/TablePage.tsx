@@ -1,5 +1,15 @@
-import { useEffect, useState } from 'react';
-import { Flag, Pause, Play, Settings2, Shield, Spade, Users } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Crown,
+  FastForward,
+  Flag,
+  Pause,
+  Play,
+  Settings2,
+  Shield,
+  Spade,
+  Users,
+} from 'lucide-react';
 import { useTableStore } from './store';
 import { canRevealAnalysis, canRevealHandRecord, decisionToken } from './types';
 import type { TableConfig, CompletedHand } from './types';
@@ -13,24 +23,33 @@ import { DecisionReview, HandReport } from '../../components/feedback/HandReport
 import { Button, Dialog } from '../../components/ui/primitives';
 import { useTrainingStore } from '../practice/store';
 
+const DEAL_DELAY_MS = 4000;
+
 export default function TablePage() {
   const store = useTableStore();
   const name = useTrainingStore((state) => state.settings.displayName);
   const [replay, setReplay] = useState<{ hand: GameState; index: number } | null>(null);
   const [endOpen, setEndOpen] = useState(false);
+  const resumeAfterEndDialog = useRef(false);
   const [review, setReview] = useState<CompletedHand | null>(null);
   const hand = store.currentHand;
   const token = decisionToken(hand);
   const active = Boolean(hand && !hand.result && !store.session?.endedAt);
   const hero = hand?.players[0];
   const heroTurn = active && hand!.actorId === hero?.id;
-  const latest = store.hands.find((record) => record.id === hand?.id);
+  const sessionHands = store.hands.filter((record) => record.sessionId === store.session?.id);
+  const latest = sessionHands[0];
+  const blocked = store.paused || Boolean(store.error || replay || review || endOpen);
+  const remaining =
+    hand?.players.filter((player) => (hand.result ? player.stack > 0 : player.startingStack > 0)) ??
+    [];
+  const heroOut = Boolean(hero && (hand?.result ? hero.stack === 0 : hero.startingStack === 0));
+  const winner = hand?.players.find((player) => player.id === store.session?.winnerId);
   useEffect(() => {
     if (
       !hand ||
       hand.result ||
-      store.paused ||
-      store.error ||
+      blocked ||
       store.session?.endedAt ||
       hand.actorId === hand.players[0].id
     )
@@ -40,13 +59,28 @@ export default function TablePage() {
       store.config.botDelayMs,
     );
     return () => clearTimeout(timer);
-  }, [hand, token, store.paused, store.error, store.config.botDelayMs, store.session?.endedAt]);
+  }, [hand, token, blocked, store.config.botDelayMs, store.session?.endedAt]);
+  useEffect(() => {
+    if (!hand?.result || blocked || store.session?.endedAt) return;
+    const timer = setTimeout(() => useTableStore.getState().nextHand(token), DEAL_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [hand, token, blocked, store.session?.endedAt]);
   const start = () => {
     setReview(null);
     store.startSession({ heroName: name });
   };
-  const openReplay = (record: GameState, index = record.events.length - 1) =>
+  const openReplay = (record: GameState, index = record.events.length - 1) => {
+    store.pause();
     setReplay({ hand: record, index });
+  };
+  const openReview = (record: CompletedHand) => {
+    store.pause();
+    setReview(record);
+  };
+  const closeEndDialog = () => {
+    setEndOpen(false);
+    if (resumeAfterEndDialog.current) store.resume();
+  };
   const reveal = canRevealAnalysis(store.config, hand, store.session);
   const lastDecision = store.decisions.at(-1);
   return (
@@ -60,13 +94,50 @@ export default function TablePage() {
           <h1>
             Play poker<span>.</span>
           </h1>
-          <p>A complete hand. A table with character. Something to learn every time.</p>
+          <p>Take your seat. Find your edge. Play down to the last stack.</p>
         </div>
         <span className="provenance-badge">
           <Shield size={13} />
-          Offline policy models · virtual chips
+          Calculated opponents · virtual chips
         </span>
       </div>
+      {winner && store.session?.endedReason === 'winner' && (
+        <section className="match-winner" aria-label="Match result">
+          <Crown size={34} />
+          <span className="eyebrow">LAST PLAYER STANDING</span>
+          <h2>
+            {winner.id === hero?.id ? 'You win the table.' : `${winner.name} wins the table.`}
+          </h2>
+          <p>
+            {chips(winner.stack / hand!.config.bigBlind)} BB · {store.session.handsCompleted}{' '}
+            {store.session.handsCompleted === 1 ? 'hand' : 'hands'} played
+          </p>
+          <div className="match-standings" aria-label="Final standings">
+            {[...hand!.players]
+              .sort((a, b) => {
+                const place = (id: string) =>
+                  id === winner.id
+                    ? 1
+                    : (store.session!.eliminations.find((item) => item.playerId === id)?.place ??
+                      hand!.players.length);
+                return place(a.id) - place(b.id);
+              })
+              .map((player) => (
+                <div key={player.id}>
+                  <span>
+                    #
+                    {player.id === winner.id
+                      ? 1
+                      : (store.session!.eliminations.find((item) => item.playerId === player.id)
+                          ?.place ?? '—')}
+                  </span>
+                  <strong>{player.name}</strong>
+                  <span>{chips(player.stack / hand!.config.bigBlind)} BB</span>
+                </div>
+              ))}
+          </div>
+        </section>
+      )}
       {(!hand || store.session?.endedAt) && (
         <section className="table-setup">
           <div className="table-setup-top">
@@ -74,8 +145,8 @@ export default function TablePage() {
               <span className="eyebrow">AI TABLE</span>
               <h2>Take a seat at the felt.</h2>
               <p>
-                Play real hands against distinct, position-aware opponents. Review the decisions
-                behind your results.
+                Hands deal automatically. Your chips carry over. Lose your stack and you’re out; the
+                last player with chips wins. Pause any time to review your decisions.
               </p>
             </div>
             <Button onClick={start}>
@@ -121,14 +192,11 @@ export default function TablePage() {
               <div className="ai-toolbar">
                 <span>
                   <span className="tiny-dot" />
-                  HAND {hand.handNumber} · {hand.players.length} PLAYERS · {hand.config.smallBlind}/
-                  {hand.config.bigBlind}
+                  HAND {hand.handNumber} ·{' '}
+                  {remaining.length === 2 ? 'HEADS-UP' : `${remaining.length} LEFT`}
                 </span>
                 <div>
-                  <button
-                    onClick={() => (store.paused ? store.resume() : store.pause())}
-                    disabled={Boolean(hand.result)}
-                  >
+                  <button onClick={() => (store.paused ? store.resume() : store.pause())}>
                     {store.paused ? <Play size={14} /> : <Pause size={14} />}{' '}
                     {store.paused ? 'Resume' : 'Pause'}
                   </button>
@@ -142,12 +210,23 @@ export default function TablePage() {
                     <Play size={14} />
                     Replay
                   </button>
-                  <button onClick={() => setEndOpen(true)}>
+                  <button
+                    onClick={() => {
+                      resumeAfterEndDialog.current = !store.paused;
+                      store.pause();
+                      setEndOpen(true);
+                    }}
+                  >
                     <Flag size={14} />
                     End session
                   </button>
                 </div>
               </div>
+              {heroOut && (
+                <div className="spectator-notice" role="status">
+                  You’re out. Watching {remaining.length} players play for the table.
+                </div>
+              )}
               <TableView state={tableView(getPublicView(hand, 0))} />
               <div className="replay-entry">
                 <button
@@ -160,23 +239,38 @@ export default function TablePage() {
                   Replay hand so far
                 </button>
                 <span>
-                  {hand.events.filter((event) => event.type === 'action').length} actions recorded
+                  {chips(hand.config.smallBlind)}/{chips(hand.config.bigBlind)} blinds · no rebuys
                 </span>
               </div>
               {hand.result ? (
-                <div className="table-action-dock">
+                <div className="table-action-dock between-hands" data-testid="hand-complete">
                   <div className="table-action-title">
                     <strong>
-                      {hand.result.reason === 'folds' ? 'The pot is won.' : 'Showdown.'}
+                      {hand.result.winnerIds
+                        .map((id) => hand.players.find((player) => player.id === id)?.name)
+                        .join(' & ')}{' '}
+                      wins
                     </strong>
-                    <span>Every chip accounted for.</span>
+                    {blocked ? <span>Dealing paused</span> : <DealCountdown key={token} />}
                   </div>
                   <div className="table-action-buttons">
-                    <button onClick={() => store.nextHand()}>Next hand →</button>
-                    <button className="table-fold" onClick={() => latest && setReview(latest)}>
-                      Review this hand
+                    <button
+                      onClick={() => {
+                        store.resume();
+                        store.nextHand(token);
+                      }}
+                    >
+                      {store.paused ? 'Resume table' : 'Deal now'}
+                    </button>
+                    <button className="table-fold" onClick={() => latest && openReview(latest)}>
+                      Review & pause
                     </button>
                   </div>
+                  {!blocked && (
+                    <div className="auto-deal-progress" key={token} aria-hidden="true">
+                      <span />
+                    </div>
+                  )}
                 </div>
               ) : store.paused ? (
                 <div className="table-action-dock live-actions">
@@ -201,24 +295,34 @@ export default function TablePage() {
                       'The table'}{' '}
                     is thinking…
                   </div>
+                  <button className="fast-forward" onClick={() => store.fastForward(token)}>
+                    <FastForward size={16} />
+                    {heroOut || hero?.status === 'folded' || hero?.status === 'all-in'
+                      ? 'Fast-forward hand'
+                      : 'Skip to my turn'}
+                  </button>
                 </div>
               )}
             </section>
             <aside className="table-side-panel">
               <span className="eyebrow">READ THE TABLE</span>
               <h2>
-                {heroTurn
-                  ? 'Your move. Your story.'
-                  : hand.result
-                    ? 'A hand in the books.'
-                    : 'A little patience. A better read.'}
+                {heroOut
+                  ? 'Your seat is out. The table plays on.'
+                  : heroTurn
+                    ? 'Your move. Your story.'
+                    : hand.result
+                      ? 'A hand in the books.'
+                      : 'A little patience. A better read.'}
               </h2>
               <p>
                 {heroTurn
                   ? 'Use the legal actions below the table. Bet and raise amounts are total commitments on this street.'
                   : 'Cards stay private until an actual showdown. The table continues from its recorded state.'}
               </p>
-              <span className="provenance-badge">{store.config.difficulty} · authored policy</span>
+              <span className="provenance-badge">
+                {store.config.difficulty} · equity + range estimates
+              </span>
               <div className="opponent-roster">
                 {hand.players.slice(1).map((player, index) => {
                   const profile = agentProfiles.find(
@@ -231,15 +335,19 @@ export default function TablePage() {
                       </span>
                       <span>
                         <strong>{player.name}</strong>
-                        <small>{profile?.name ?? 'Range-based regular'}</small>
+                        <small>
+                          {(hand.result ? player.stack === 0 : player.startingStack === 0)
+                            ? 'Eliminated'
+                            : (profile?.name ?? 'Range-based regular')}
+                        </small>
                       </span>
                     </div>
                   );
                 })}
               </div>
               <p>
-                Difficulty changes policy simplifications. These opponents are not verified GTO
-                agents.
+                Opponents weigh their estimated chances, the price, position, and public betting.
+                Estimated ranges are assumptions, not knowledge of your cards.
               </p>
               <Button
                 variant="secondary"
@@ -273,14 +381,32 @@ export default function TablePage() {
               }}
             />
           )}
-          {latest && (
-            <HandReport
-              record={latest}
-              reveal={canRevealHandRecord(store.config, latest, store.session)}
-              onReplay={(index) => openReplay(latest.state, index)}
-              onSave={() => store.saveHand(latest.id)}
-              saved={store.savedHands.some((item) => item.handId === latest.id)}
-            />
+          {sessionHands.length > 0 && (
+            <section className="recent-table-hands" aria-label="Recent hands">
+              <div className="section-heading">
+                <h2>Your recent hands</h2>
+                <span>Reviewing pauses the table</span>
+              </div>
+              <div className="session-hand-list">
+                {sessionHands.slice(0, 6).map((record) => (
+                  <button key={record.id} onClick={() => openReview(record)}>
+                    <span>
+                      <strong>Hand {record.state.handNumber}</strong>
+                      <small>
+                        {record.decisions.length} decisions ·{' '}
+                        {canRevealHandRecord(store.config, record, store.session)
+                          ? 'Review what worked and why'
+                          : 'Review available when the session ends'}
+                      </small>
+                    </span>
+                    <span>
+                      {record.outcome.heroNet >= 0 ? '+' : ''}
+                      {chips(record.outcome.heroNet / record.state.config.bigBlind)} BB →
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
           )}
         </>
       )}
@@ -288,20 +414,26 @@ export default function TablePage() {
         <section className="content-panel">
           <div className="section-heading">
             <h2>Your table session</h2>
-            <span>{store.session.handsCompleted} completed hands</span>
+            <span>
+              {store.session.handsCompleted} completed{' '}
+              {store.session.handsCompleted === 1 ? 'hand' : 'hands'}
+            </span>
           </div>
           <p className="panel-description">
-            {store.session.decisions} decisions recorded. {chips(store.session.heroNet)} net
-            practice chips. Review each hand on its own merits.
+            {store.session.decisions} {store.session.decisions === 1 ? 'decision' : 'decisions'}{' '}
+            recorded. {chips(store.session.heroNet)} net practice chips. Review each hand on its own
+            merits.
           </p>
           <div className="session-hand-list">
             {store.hands
               .filter((record) => record.sessionId === store.session!.id)
               .map((record) => (
-                <button key={record.id} onClick={() => setReview(record)}>
+                <button key={record.id} onClick={() => openReview(record)}>
                   <span>
                     <strong>
-                      Hand {record.state.handNumber} · {record.state.players.length} players
+                      Hand {record.state.handNumber} ·{' '}
+                      {record.state.players.filter((player) => player.startingStack > 0).length}{' '}
+                      players
                     </strong>
                     <small>
                       {record.report.totalDecisions} decisions ·{' '}
@@ -342,7 +474,7 @@ export default function TablePage() {
           if (!open) setReview(null);
         }}
         title="Hand performance"
-        description="The result tells one story. Your decisions tell another."
+        description="The table is paused. Understand what worked, what to improve, and why. Close this review and resume when you’re ready."
       >
         {review && (
           <HandReport
@@ -359,12 +491,14 @@ export default function TablePage() {
       </Dialog>
       <Dialog
         open={endOpen}
-        onOpenChange={setEndOpen}
+        onOpenChange={(open) => {
+          if (!open) closeEndDialog();
+        }}
         title="Finish this table session?"
         description="Completed hands and recorded decisions are kept. An unfinished hand will remain paused and cannot become a scored completed hand."
       >
         <div className="dialog-actions">
-          <Button variant="secondary" onClick={() => setEndOpen(false)}>
+          <Button variant="secondary" onClick={closeEndDialog}>
             Keep playing
           </Button>
           <Button
@@ -457,14 +591,6 @@ function TableSettings({
             <option value={1200}>Thoughtful · 1.2 seconds</option>
           </select>
         </label>
-        <label className="checkbox-setting">
-          <input
-            type="checkbox"
-            checked={config.autoRebuy}
-            onChange={(e) => update({ autoRebuy: e.target.checked })}
-          />
-          Auto-rebuy practice chips
-        </label>
         {Array.from({ length: config.playerCount - 1 }, (_, index) => (
           <label key={index}>
             Seat {index + 2} profile
@@ -486,12 +612,20 @@ function TableSettings({
         ))}
       </div>
       <p>
-        Expert uses the full authored policy. It is not a claim of professional or solver strength.
-        With rebuys off, busted opponents sit out. The session stops when you are out of chips or
-        fewer than two seats are funded.
+        One stack each, fixed blinds, no rebuys. If you’re eliminated, you can watch the remaining
+        players until a winner is declared. Expert uses the fullest calculated policy; it is not
+        verified solver play.
       </p>
     </details>
   );
+}
+function DealCountdown() {
+  const [seconds, setSeconds] = useState(DEAL_DELAY_MS / 1000);
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds((value) => Math.max(1, value - 1)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <span className="deal-countdown">Next deal in {seconds}s</span>;
 }
 function ActionDock({
   hand,

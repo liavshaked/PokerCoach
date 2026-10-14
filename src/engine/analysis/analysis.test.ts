@@ -8,6 +8,7 @@ import {
   summarizeHand,
 } from './index';
 import type { HeroDecision } from './types';
+import type { Card } from '../../types/poker';
 
 const view = (count = 2): AgentView => {
   const state = createHand({
@@ -32,6 +33,48 @@ const decision = (information: AgentView): HeroDecision => {
     chosenAction: { type: 'call' as const },
   };
   return { ...snapshot, analysis: analyzeDecision(snapshot) };
+};
+
+const drawDecision = (): AgentView => {
+  const information = view();
+  information.table.street = 'flop';
+  information.table.board = [
+    { rank: 'K', suit: 'hearts' },
+    { rank: '9', suit: 'hearts' },
+    { rank: '2', suit: 'clubs' },
+  ];
+  information.holeCards = [
+    { rank: 'A', suit: 'hearts' },
+    { rank: 'J', suit: 'hearts' },
+  ];
+  information.table.players[0] = {
+    ...information.table.players[0],
+    stack: 96,
+    committed: 4,
+    streetCommitted: 0,
+  };
+  information.table.players[1] = {
+    ...information.table.players[1],
+    stack: 92,
+    committed: 8,
+    streetCommitted: 4,
+  };
+  information.table.pot = 12;
+  information.table.currentBet = 4;
+  information.legalActions = [
+    { type: 'fold' },
+    { type: 'call', amount: 4 },
+    { type: 'raise', minAmount: 8, maxAmount: 96 },
+  ];
+  information.table.events.push({
+    index: information.table.events.length,
+    street: 'flop',
+    type: 'action',
+    playerId: 'bot-1',
+    action: { type: 'bet', amount: 4 },
+    paid: 4,
+  });
+  return information;
 };
 
 describe('transparent full-hand analysis', () => {
@@ -60,6 +103,111 @@ describe('transparent full-hand analysis', () => {
     expect(item.analysis.evLoss).toBeNull();
     expect(item.analysis.source.category).toBe('model-based');
     expect(item.analysis.assumptions.join(' ')).toContain('not solver');
+  });
+
+  it('explains a draw using the actual cards, calling price, position and an actionable comparison', () => {
+    const item = decision(drawDecision());
+    expect(item.analysis.coaching?.situation).toContain('A♥ J♥');
+    expect(item.analysis.coaching?.situation).toContain('flush draw');
+    expect(item.analysis.coaching?.why).toContain('Calling costs 4 chips to contest 16 chips');
+    expect(item.analysis.coaching?.why).toContain('25%');
+    expect(item.analysis.coaching?.why).toContain('estimated showdown share');
+    expect(item.analysis.coaching?.why).toContain('does not guarantee winning');
+    expect(item.analysis.coaching?.why).toContain('You act after');
+    expect(item.analysis.coaching?.alternative).toMatch(/chips|checking/);
+    expect(item.analysis.coaching?.takeaway).toContain('25% price');
+    expect(item.analysis.estimatedEquity?.samples).toBeGreaterThanOrEqual(128);
+    expect(item.analysis.estimatedEquity?.samplingMargin).toBeGreaterThan(0);
+    expect(item.analysis.assumptions.join(' ')).toContain('uncertainty in the opponent range');
+  });
+
+  it('describes street-total raises as the actual extra chips risked, rather than spending the same chips twice', () => {
+    const information = drawDecision();
+    information.table.players[0].streetCommitted = 2;
+    information.table.players[0].stack = 94;
+    information.table.players[0].committed = 6;
+    information.table.pot = 14;
+    information.legalActions = [
+      { type: 'fold' },
+      { type: 'call', amount: 2 },
+      { type: 'raise', minAmount: 8, maxAmount: 96 },
+    ];
+    const snapshot = {
+      ...decision(information),
+      chosenAction: { type: 'raise' as const, amount: 12 },
+    };
+    const analysis = analyzeDecision(snapshot);
+    expect(analysis.coaching?.why).toContain('raise adds 10 chips and leaves 84 behind');
+    expect(analysis.coaching?.alternative).not.toContain(' BB');
+  });
+
+  it('teaches the different heads-up positions and excludes eliminated seats from scoring limits', () => {
+    const information = view(6);
+    information.playerId = 'hero';
+    information.table.actorId = 'hero';
+    information.table.players[0].position = 'BTN/SB';
+    for (const player of information.table.players.slice(2)) {
+      player.stack = 0;
+      player.startingStack = 0;
+      player.committed = 0;
+      player.streetCommitted = 0;
+      player.status = 'folded';
+    }
+    const result = decision(information);
+    expect(result.analysis.scored).toBe(true);
+    expect(result.analysis.coaching?.why).toContain(
+      'Heads-up, the button acts first before the flop and last on later streets',
+    );
+    expect(result.analysis.estimatedEquity?.opponents).toBe(1);
+    information.table.players[0].position = 'BB';
+    expect(decision(information).analysis.coaching?.why).toContain(
+      'big blind acts first after the flop',
+    );
+  });
+
+  it('keeps a terminal all-in call qualitative and explains that no later payment is needed', () => {
+    const information = drawDecision();
+    information.table.players[1].status = 'all-in';
+    information.table.players[1].stack = 0;
+    information.legalActions = [{ type: 'fold' }, { type: 'call', amount: 4 }];
+    const result = decision(information);
+    expect(result.analysis.score).toBeNull();
+    expect(result.analysis.grade).toBeNull();
+    expect(result.analysis.coaching?.why).toContain('without another payment from you');
+    expect(result.analysis.coaching?.why).not.toContain('can cost more than this call alone');
+    expect(result.analysis.coaching?.alternative).not.toContain('Reassess if the price changes');
+    expect(result.analysis.coaching?.takeaway).not.toContain('Allow for future bets');
+  });
+
+  it('does not score an all-in raise as a supported ordinary sizing choice', () => {
+    const snapshot = decision(view());
+    const hero = snapshot.view.table.players.find(
+      (player) => player.id === snapshot.view.playerId,
+    )!;
+    snapshot.chosenAction = { type: 'raise', amount: hero.stack + hero.streetCommitted };
+    const analysis = analyzeDecision(snapshot);
+    expect(analysis.score).toBeNull();
+    expect(analysis.grade).toBeNull();
+    expect(analysis.coaching?.why).toContain('leaves 0 behind');
+  });
+
+  it('produces the same review when hidden opponent cards and future deck cards change', () => {
+    const state = createHand({
+      seed: 'review-information-boundary',
+      players: [
+        { id: 'hero', name: 'You', stack: 100 },
+        { id: 'bot-1', name: 'Bot', stack: 100 },
+      ],
+      smallBlind: 0.5,
+      bigBlind: 1,
+    });
+    const before = decision(getAgentView(state, 'hero'));
+    const changed = structuredClone(state);
+    changed.players[1].holeCards = [...changed.deck.slice(-2)] as Card[];
+    changed.deck = [...changed.deck].reverse();
+    changed.seed = 'a-future-deck-must-not-be-an-input';
+    const after = decision(getAgentView(changed, 'hero'));
+    expect(after.analysis).toEqual(before.analysis);
   });
 
   it('keeps multi-way postflop and unsupported stack depths unscored with useful explanations', () => {
@@ -104,6 +252,8 @@ describe('transparent full-hand analysis', () => {
     expect(report.score).toBeNull();
     expect(report.mostImportantDecisionId).toBe('unsupported');
     expect(report.biggestEvLoss).toBeNull();
+    expect(report.improvements?.some((point) => point.decisionId === 'unsupported')).toBe(true);
+    expect(report.summary).toContain('reviewed in words');
   });
 
   it('aggregates only supported scores and returns no number for zero coverage', () => {

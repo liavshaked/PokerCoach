@@ -17,6 +17,21 @@ export interface PotOddsAnalysis {
   requiredEquity: number;
   explanation: string;
 }
+export interface DecisionCoaching {
+  situation: string;
+  verdict: string;
+  why: string;
+  alternative: string;
+  takeaway: string;
+}
+export interface EstimatedDecisionEquity {
+  share: number;
+  samples: number;
+  /** Approximate 95% Monte Carlo sampling margin; excludes range-model uncertainty. */
+  samplingMargin: number;
+  opponents: number;
+  method: string;
+}
 export interface DecisionAnalysis {
   status: 'available' | 'unavailable';
   level: 'model' | 'heuristic' | 'mathematical' | 'solver';
@@ -38,6 +53,9 @@ export interface DecisionAnalysis {
   potOdds: PotOddsAnalysis | null;
   evLoss: number | null;
   tags: string[];
+  /** Optional only for compatibility with older saved reports. Rebuilt from the decision snapshot. */
+  coaching?: DecisionCoaching;
+  estimatedEquity?: EstimatedDecisionEquity;
 }
 export interface HeroDecision extends DecisionSnapshot {
   analysis: DecisionAnalysis;
@@ -65,4 +83,13 @@ export interface HandReport {
   streets: StreetReport[];
   lessons: string[];
   method: string;
+  summary?: string;
+  strengths?: CoachingPoint[];
+  improvements?: CoachingPoint[];
+}
+export interface CoachingPoint {
+  decisionId: string;
+  street: string;
+  title: string;
+  detail: string;
 }

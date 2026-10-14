@@ -304,6 +304,37 @@ describe('complete NLHE event engine', () => {
     expect(state.buttonSeat).toBe(1);
     expect(validateGameState(state).valid).toBe(true);
   });
+  it.each([2, 3, 6] as const)(
+    'carries winning and losing stacks into the next %i-player hand with auto-rebuy enabled',
+    (count) => {
+      const completed = checkCall(createHand(config(count)));
+      const stacks = completed.players.map((player) => player.stack);
+      expect(stacks.some((stack) => stack > 0 && stack < 100)).toBe(true);
+      const following = nextHand(completed, {
+        seed: `carry-stacks-${count}`,
+        autoRebuy: true,
+        startingStack: 100,
+      });
+      expect(following.players.map((player) => player.startingStack)).toEqual(stacks);
+      expect(following.players.reduce((sum, player) => sum + player.stack, following.pot)).toBe(
+        count * 100,
+      );
+    },
+  );
+  it('rebuys only busted seats while preserving funded players below and above the starting stack', () => {
+    const completed = checkCall(createHand(config(3, [100, 0, 100])));
+    expect(completed.players.some((player) => player.stack > 0 && player.stack < 100)).toBe(true);
+    const following = nextHand(completed, {
+      seed: 'rebuy-busted-only',
+      autoRebuy: true,
+      startingStack: 100,
+    });
+    expect(following.players.map((player) => player.startingStack)).toEqual(
+      completed.players.map((player) => (player.stack === 0 ? 100 : player.stack)),
+    );
+    expect(following.players[1].startingStack).toBe(100);
+    expect(following.players.reduce((sum, player) => sum + player.stack, following.pot)).toBe(300);
+  });
   it('keeps busted seats out without rebuy and uses heads-up rules when two funded players remain', () => {
     let state = createHand(config(6, [100, 0, 0, 100, 0, 0]));
     expect(state.smallBlindSeat).toBe(0);

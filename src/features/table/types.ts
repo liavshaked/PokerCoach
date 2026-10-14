@@ -21,6 +21,9 @@ export interface TableSession {
   policySeed: string;
   startedAt: string;
   endedAt: string | null;
+  winnerId: string | null;
+  eliminations: { playerId: string; handNumber: number; place: number }[];
+  endedReason: 'winner' | 'left' | null;
   handsStarted: number;
   handsCompleted: number;
   decisions: number;
@@ -57,9 +60,10 @@ export interface TableState {
 }
 export interface TableStore extends TableState {
   startSession: (config?: Partial<TableConfig>, seed?: string) => boolean;
-  nextHand: () => boolean;
+  nextHand: (expectedToken?: string) => boolean;
   submitHero: (action: GameAction, expectedToken: string) => boolean;
   stepBot: (expectedToken: string) => boolean;
+  fastForward: (expectedToken: string) => boolean;
   pause: () => void;
   resume: () => void;
   endSession: () => void;

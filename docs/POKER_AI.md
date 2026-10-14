@@ -1,77 +1,75 @@
-# Operational poker opponents
+﻿# Calculated poker opponents
 
-V3 runs six local opponent personalities through `src/engine/agents/index.ts`. They use the authored `feltlab-range-policy-v1` model. These are conditional range/holding policies, not an LLM, solver strategy, trained research model, professional-strength claim, or GTO implementation.
+The current opponent model is `feltlab-calculated-policy-v2`, implemented in `src/engine/agents/`. It combines a bounded showdown simulation with explicit range and betting assumptions. Six personalities and four difficulty settings remain operational. No LLM, external service, paid API or downloaded research policy is required. This is a local training opponent, with no claim of solver optimality or professional strength.
 
-## Information boundary
+## What a decision calculates
 
-The game engine gives each policy an `AgentView`: the public table, that actor's two private cards, and current legal actions. Public players omit live hole cards; public events omit dealt private cards, seeds, burn cards and the future deck. Only actual showdown cards become public. Policies never receive `GameState`, the UI hero projection, another player's hidden hand or future board cards. Policies receive only a random **draw**, not any deck or policy seed. The coordinator owns an independently generated, persisted policy stream, so policy randomness cannot reveal the deck's master seed. Public hand identifiers are opaque. Tests alter hidden cards/deck order and verify identical views and deterministic decisions.
+`estimateSituation(view, samples = 128)` samples plausible opponent holdings and remaining board cards, evaluates the resulting best-five hands, and estimates the acting player's share at showdown. A positive-weight range is constructed for every live opponent from public preflop entries and public postflop calls, bets and raises. Large or repeated aggression favors stronger value holdings while retaining authored draw/bluff weight. Checked and unentered ranges remain broad. Known cards block impossible holdings; sampled opponents cannot share cards. Randomized assignment order reduces seat-order effects in the sequential range approximation.
 
-Public observations store action counts, one voluntary preflop entry per hand, aggression, calls/folds, and responses to river bets. They do not store cards or inferred private truth. In an offline browser, a determined user can inspect internal local state; this does not change the application's and policies' explicit information boundaries.
+This estimate uses **assumed ranges**, not actual hidden cards. The accompanying standard error measures simulation noise only; uncertainty about the range model can be much larger. The model does not infer an exact joint Bayesian posterior or claim GTO frequencies. Folded, unrevealed cards remain unknown. There is no use of future game cards or information revealed later in the hand.
 
-## Coherent personalities
+For a call, the calculation caps eligible contributions at the player's contribution after calling. Inaccessible side pots are excluded from the price, and estimated showdown shares are weighted across eligible pot layers. Opponents who can fund a layer are assumed to contest it. The immediate break-even price is `call / (currently eligible pot + call)`. Future calls, folds, bets, rake and tournament payout utility are excluded. The policy therefore does not label the estimate as actual call EV.
 
-| Profile              | Entry / three-bet structure floors | Aggression coefficient | Bluff coefficient | Behavior                                               |
-| -------------------- | ---------------------------------: | ---------------------: | ----------------: | ------------------------------------------------------ |
-| Balanced regular     |                            27 / 43 |                   0.62 |              0.10 | Selective position-aware entries; restrained pressure  |
-| Tight aggressive     |                            32 / 47 |                   0.72 |             0.035 | Narrow continuations, stronger value lines             |
-| Loose aggressive     |                            21 / 37 |                   0.88 |              0.24 | Wider entries, larger bets, more pressure              |
-| Patient recreational |                            20 / 51 |                   0.16 |             0.015 | Wide calls, small bets, few three-bets/bluffs          |
-| Tricky aggressive    |                            25 / 40 |                   0.77 |              0.20 | Delayed flop value, draw aggression, relevant blockers |
-| Observant regular    |                            28 / 43 |                   0.68 |              0.10 | Selective baseline plus bounded expert adaptation      |
+The action policy compares this estimate with the call price. Before the river, it also applies an explicitly authored equity-realization discount for position and multiple opponents. All-in runouts and river calls do not receive this future-betting discount. Pot-relative sizing changes with estimated value, board coordination, profile and stack-to-pot ratio; strong short-stack value hands can commit their remaining stack. Every amount is rounded and clamped to the game engine's legal bounds.
 
-These coefficients are authored inputs to a conditional model. They are **not** action-frequency recommendations, population estimates, equity values or source-backed preflop charts. The existing V2 preflop structure function supplies an ordinal card score. Position, earlier raises and price change its entry threshold; several large preflop raises tighten continuing requirements.
+Preflop hand structure and position remain selection inputs. A high raw showdown share does not by itself justify playing an early-position holding through several betting rounds. A forced all-in call is evaluated primarily through its modeled showdown share and actual price. Postflop selection uses sampled showdown outcomes instead of treating an ordinal made-hand score as equity. Hand-category, draw and blocker features explain the context and help choose pressure/sizing; they remain distinct from the simulation result.
 
-Postflop features include the actual best-five hand category from `pokersolver`, top/over/underpairs, potential straight/flush draws, paired/coordinated boards and ace flush blockers. Their combined strength remains an ordinal feature, never an equity estimate. Active-player count, visible aggression, effective stack-to-pot ratio and position affect action weights. Multi-way play becomes more selective and bluff weight decreases. The size model uses distinct profile fractions and preflop raise multipliers, then clamps/rounds to engine-certified legal bounds, including short all-ins.
+## Information and runtime boundary
 
-Randomness samples the resulting conditional action distribution using a reproducible seed. It does not randomly select among legal actions without reference to the holding and public situation. Every selected action passes the same authoritative rules engine as hero actions.
+Policies accept only `AgentView`: the public table, the acting player's own two cards and legal actions. Public views omit private opponent cards, future deck order, burns, deal seeds and hidden event data. A coordinator supplies one independent `randomValue` draw for action sampling. Policies never receive the deck seed or policy stream seed.
 
-## Difficulty and adaptation
+The estimator's deterministic sampling seed is derived only from public range summaries, own cards and the visible board. Price-only changes preserve the same simulation draws, so a larger call does not accidentally get a more favorable estimate from fresh sampling noise. A bounded 384-entry cache is shared by opponent policy and coaching. Sampling is restricted to 32-256 trials; the shipped policy and coach use 128.
 
-- **Beginner:** no position adjustment or draw bonus; more tolerant calls; simplified aggression responses.
-- **Intermediate:** position and potential draws influence the policy.
-- **Advanced:** additionally uses multi-way pressure, repeated aggression and board coordination.
-- **Expert:** additionally favors relevant ace blockers in preflop three-bet selection and constrains postflop bluffs toward draws/nut-flush blockers, reducing unstructured bluffs. It also enables adaptation for the observant profile. Tests verify a different balanced advanced/expert distribution; this label is not a measured strength ranking.
+A small exact standard Hold'em rank helper handles simulation samples. Actual game settlement still uses the existing `pokersolver` integration. The helper is differentially tested against that evaluator in 2,000 seeded random 5-7-card comparisons plus wheel, full-house, flush and board-tie cases. Range features are prepared once per range instead of rebuilding board maps for every candidate holding.
 
-The observant expert increases its river bluff coefficient by at most 1.6 after at least eight public river-bet opportunities with more than 65% folds against the active opponents. It widens its ordinal defense tolerance by 0.035 after at least 30 public actions with more than 40% bets/raises. Adjustments are deliberately bounded, do not assert population significance, and remain conditioned on board/holding/pot features. Tests check both sample thresholds and the absence of adaptation at lower difficulties.
+The measured cold six-player flop calculation in the checked-in benchmark took a median **9.76 ms**, p95 **15.52 ms**, and maximum **24.55 ms** over 30 distinct decisions on the Node test host. This is a development measurement, not a phone or browser guarantee. Browser flow tests cover the actual interface separately.
 
-## Table integration and persistence
+Public observations contain action counts, preflop entry counts and river-bet responses. They contain no private-card truth. A determined user can inspect their own offline browser storage; that does not change what the application passes to policies.
 
-`useTableStore` creates 2-, 3- or 6-player games, defaulting to six seats and 100 BB. `stepBot(decisionToken)` advances **one** actor; the UI schedules its delay. A token includes hand ID, event count and actor ID, so repeated/stale timers and double-clicks cannot act twice, even across consecutive hero turns on different streets. Pause/resume preserves the exact actor and history. Next-hand creation rotates the button and respects engine rebuy/sit-out rules.
+## Personalities and difficulty
 
-`feltlab-table-v3` is separate from both V2 progress keys. Persisted hands contain authoritative event histories and compact hero-decision metadata. Restoration replays the events, reconstructs each prior actor information set and reruns deterministic analysis; supplied snapshots/grades are not trusted. Recent history retains 60 hands; the notebook independently retains up to 100 saved full hands with notes, tags and review marks. These retention limits do not cap how many hands a session can play. Export includes event histories for replay and original recorded decisions. Reset preserves table configuration and leaves V2 history untouched.
+| Profile              | Entry / three-bet structure floors | Aggression | Bluff coefficient | Distinct behavior                                              |
+| -------------------- | ---------------------------------: | ---------: | ----------------: | -------------------------------------------------------------- |
+| Balanced regular     |                            27 / 43 |       0.62 |              0.10 | Selective entries and restrained pressure                      |
+| Tight aggressive     |                            32 / 47 |       0.72 |             0.035 | Narrower continuations and stronger value lines                |
+| Loose aggressive     |                            21 / 37 |       0.88 |              0.24 | Wider entries, larger sizes and more pressure                  |
+| Patient recreational |                            20 / 51 |       0.16 |             0.015 | Wider calls, smaller bets and few three-bets                   |
+| Tricky aggressive    |                            25 / 40 |       0.77 |              0.20 | Delayed flop value and draw/blocker pressure                   |
+| Observant regular    |                            28 / 43 |       0.68 |              0.10 | Selective baseline plus bounded public-observation adjustments |
 
-Cumulative `totals` retain completed-hand count, hero-decision count (including unfinished hands) and net chips across sessions independently of recent-history retention. These are activity/outcome counts, not coaching grades. Coaching trends based on retained histories must be labeled as recent rather than lifetime. Damaged timestamp metadata does not lose real actions: they are reconstructed from authoritative events with an explicitly unknown timestamp. Counters cannot fall below deduplicated known histories; fully pruned pre-counter history cannot be recovered or invented.
+These coefficients define an authored behavior model; they are not population estimates or solved action frequencies. The same public-range calculation supports every personality, while selection thresholds, call tolerance, aggression and sizing produce different choices.
 
-Feedback timing is centralized: instant, after the complete hand, or after ending the session. Session-review records remain suppressed while their session is active, including notebook entry points. Unknown opponent cards remain unknown in replay unless actually revealed at showdown.
+- **Beginner:** more tolerant calls and simplified position/pressure treatment.
+- **Intermediate:** position and drawing potential affect selection.
+- **Advanced:** also responds to repeated aggression, multiple opponents and coordinated boards.
+- **Expert:** also changes blocker-sensitive preflop three-bet selection and postflop bluff construction. It enables the observant profile's bounded adaptation.
 
-## Measured policy benchmark
+An observant expert can multiply its river bluff coefficient by at most 1.6 after at least eight publicly observed river-bet opportunities with more than 65% folds. It widens call tolerance by 0.035 after at least 30 actions with more than 40% bets/raises. These are modest behavioral adjustments, not statistical claims about a player's true strategy. A higher difficulty label is not a measured strength ranking.
 
-The reproducible run and confidence intervals are stored in [V3_AI_BENCHMARK.json](V3_AI_BENCHMARK.json). The benchmark executes **9,000 complete heads-up hands**: nine profile/difficulty cases, each with 500 independent two-hand blocks. Within a block the deck seed is repeated and the policies swap seats. Blinds are 0.5/1, stacks reset to 100 BB each hand, positions rotate, and there is no rake. Observation history resets per independent block, so the experiment does not measure long-session adaptation. Adaptation is tested separately against supplied public observations.
+## Continuous table and review integration
 
-Each result is candidate net BB per hand ×100 against a balanced/intermediate reference. The approximate 95% interval uses the standard deviation of the 500 paired-block means divided by √500, multiplied by 1.96. The pairing accounts for within-block dependence; intervals remain approximate and apply to this reference/format only. They do not measure exploitability, equilibrium quality, professional strength or multi-way strength. Difficulty changes need not improve returns against this particular opponent.
+The table maintains stack ownership across hands, eliminates busted players and rotates play among remaining seats until a champion remains. Policies exclude folded and eliminated players from sampled opposition. An eliminated player cannot re-enter through an invented range or rebuy. The table controller owns animation delays, automatic dealing, pausing and fast-forward; the policy supplies only one legal action at a time.
 
-Measured on October 13, 2026, with the shipped independent policy stream:
+`decisionToken` includes hand identity, event count and acting player. Stale timers cannot apply a second action after the decision changes. Pausing, reviewing and replaying preserve authoritative history. Coaching reuses the same calculation but explains position, price, range assumptions, chosen action and a practical alternative in ordinary language. Outcome and later-revealed cards are not inputs to the earlier decision review.
 
-| Candidate                     | BB / 100 hands | Approximate 95% interval |
-| ----------------------------- | -------------: | ------------------------ |
-| Balanced / beginner           |          26.45 | −13.00 to 65.90          |
-| Balanced / intermediate       |          21.60 | −10.77 to 53.97          |
-| Balanced / advanced           |          18.25 | −13.38 to 49.88          |
-| Balanced / expert             |          18.35 | −13.27 to 49.97          |
-| Tight aggressive / expert     |          10.85 | −27.42 to 49.12          |
-| Loose aggressive / expert     |          31.30 | −15.77 to 78.37          |
-| Patient recreational / expert |         −23.55 | −48.27 to 1.17           |
-| Tricky / expert               |          23.85 | −9.27 to 56.97           |
-| Observant / expert            |          22.65 | −8.85 to 54.15           |
+Numeric coaching remains **model agreement**, with explicit coverage limits. A sampled range estimate does not make a multiway/all-in score or an EV-loss claim automatically trustworthy. Feedback timing continues to gate review visibility during live play and deferred sessions. See [STRATEGY_SCORING.md](STRATEGY_SCORING.md) for review and aggregation rules.
 
-Every interval includes zero. This run does **not** establish superiority over the reference or a reliable difficulty ranking. Its self-play control also includes zero, as expected. Larger independent experiments against multiple policies and humans are needed before making stronger quality claims.
+## Current benchmark and historical results
 
-Reproduce in PowerShell:
+[AI_CALCULATED_BENCHMARK.json](AI_CALCULATED_BENCHMARK.json) records a bounded run of **576 complete heads-up hands** for the current calculated policy, measured on October 14, 2026: nine profile/difficulty cases, each with 32 independent two-hand blocks. Within a block the policies swap seats on the same deck. Each hand begins with 100 BB stacks, blinds 0.5/1, and no rake. Public-observation history resets between independent blocks.
+
+Each candidate is compared with the current balanced/intermediate reference. Approximate 95% intervals use the standard deviation of paired-block means divided by the square root of the block count, multiplied by 1.96. All intervals in this small run include zero. The run verifies reproducible outcomes and legal complete play; it does **not** establish superiority, tournament strength, exploitability, a difficulty ranking or an improvement over the previous model. Some balanced difficulty results are identical in this small sample; tests separately exercise the specific conditions where their policies differ.
+
+The older [V3_AI_BENCHMARK.json](V3_AI_BENCHMARK.json) contains 9,000 hands for `feltlab-range-policy-v1`. It is preserved as a historical artifact and does not describe the current calculated model. The new model has not been matched against the old model in a strength experiment.
+
+Reproduce the bounded current run in PowerShell:
 
 ```powershell
 $env:FELTLAB_AI_BENCHMARK='1'
+$env:FELTLAB_AI_BENCHMARK_PAIRS='32'
 npm.cmd test -- src/engine/agents/benchmark.test.ts
 Remove-Item Env:FELTLAB_AI_BENCHMARK
+Remove-Item Env:FELTLAB_AI_BENCHMARK_PAIRS
 ```
 
-The ordinary test suite runs a smaller deterministic benchmark check. External solver-backed or trained agents are extension points; no such full-game policy is registered in this release. Any future adapter must declare supported player counts, stack/action abstractions, exact state matching and traceable source/model provenance before being used or benchmarked.
+Increasing paired blocks improves sampling precision at additional runtime. The ordinary suite runs a smaller reproducibility check, complete hands across all formats/profiles/difficulties, public-information isolation checks, price sensitivity, card blocking, strong/weak holdings, exact board ties and side-pot eligibility tests. Future solver-backed or trained agents must declare their supported formats, action abstractions, source and validation before replacing this policy.

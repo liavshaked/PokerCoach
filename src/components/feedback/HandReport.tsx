@@ -1,66 +1,95 @@
-import { Bookmark, Play, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Bookmark, Play, ArrowRight, ShieldCheck, CheckCircle2, Lightbulb } from 'lucide-react';
 import type { CompletedHand, HeroDecision } from '../../features/table/types';
+import type { CoachingPoint } from '../../engine/analysis/types';
+import { summarizeHand } from '../../engine/analysis';
 import { chips } from '../poker/TableView';
 import { Button } from '../ui/primitives';
 
 const gradeLabels = {
-  preferred: 'Strong model fit',
-  defensible: 'Reasonable alternative',
-  mistaken: 'Model disagreement',
+  preferred: 'Model favors this choice',
+  defensible: 'A reasonable option',
+  mistaken: 'Worth another look',
 };
+
 export function DecisionReview({
   decision,
   onReplay,
+  important = false,
 }: {
   decision: HeroDecision;
   onReplay?: (eventIndex: number) => void;
+  important?: boolean;
 }) {
   const { analysis, chosenAction, view } = decision;
+  const coaching = analysis.coaching;
+  const callAmount = analysis.potOdds?.toCall;
   return (
-    <article className="decision-review">
+    <article className={`decision-review${important ? ' key-decision' : ''}`}>
       <header>
         <h3>
           {view.table.street} · {chosenAction.type}
           {chosenAction.amount !== undefined
             ? `${chosenAction.type === 'bet' || chosenAction.type === 'raise' ? ' to' : ''} ${chips(chosenAction.amount)}`
-            : ''}
+            : chosenAction.type === 'call' && callAmount
+              ? ` ${chips(callAmount)}`
+              : ''}
         </h3>
-        <span className="provenance-badge">{analysis.source.label}</span>
+        <span className="provenance-badge">
+          {important
+            ? 'Key decision'
+            : analysis.grade
+              ? gradeLabels[analysis.grade]
+              : 'Review in words'}
+        </span>
       </header>
-      <p>
-        Pot {chips(view.table.pot)} chips ·{' '}
-        {view.table.players.find((player) => player.id === view.playerId)?.position} ·{' '}
-        {chips(view.table.players.find((player) => player.id === view.playerId)?.stack ?? 0)}{' '}
-        behind.{' '}
-        <strong>
-          {analysis.scored ? 'Model preference' : 'Illustrative model line'}:{' '}
-          {analysis.recommendedActions
-            .map(
-              (action) =>
-                `${action.type}${action.amount === undefined ? '' : `${action.type === 'bet' || action.type === 'raise' ? ' to' : ''} ${chips(action.amount)}`}`,
-            )
-            .join(' / ')}
-          .
-        </strong>
-      </p>
-      <p>{analysis.explanation}</p>
-      <div className="decision-review-details">
-        <span>{analysis.grade ? gradeLabels[analysis.grade] : 'Not scored'}</span>
-        <span>{analysis.confidence} confidence</span>
-        {analysis.potOdds && (
-          <span>Immediate price {(analysis.potOdds.requiredEquity * 100).toFixed(1)}%</span>
-        )}
-      </div>
-      <p>
-        <strong>{analysis.principle}</strong>
-      </p>
+      {coaching ? (
+        <>
+          <p className="decision-situation">{coaching.situation}</p>
+          <p className="decision-verdict">
+            <strong>{coaching.verdict}</strong>
+          </p>
+          <p>{coaching.why}</p>
+          <div className="decision-alternative">
+            <span className="eyebrow">A LINE TO COMPARE</span>
+            <p>{coaching.alternative}</p>
+          </div>
+          <p>
+            <strong>Next time:</strong> {coaching.takeaway}
+          </p>
+        </>
+      ) : (
+        <>
+          <p>{analysis.explanation}</p>
+          <p>
+            <strong>{analysis.principle}</strong>
+          </p>
+        </>
+      )}
       <details>
-        <summary>Assumptions & evaluation</summary>
+        <summary>How this review was calculated</summary>
+        <p>
+          {analysis.source.label} · {analysis.confidence} confidence.
+        </p>
+        {analysis.estimatedEquity && (
+          <p>
+            Estimated showdown share: {Math.round(analysis.estimatedEquity.share * 100)}% from{' '}
+            {analysis.estimatedEquity.samples} simulated completions against{' '}
+            {analysis.estimatedEquity.opponents} assumed opponent{' '}
+            {analysis.estimatedEquity.opponents === 1 ? 'range' : 'ranges'}. Approximate sampling
+            margin: ±{Math.round(analysis.estimatedEquity.samplingMargin * 100)} percentage points.
+            This margin does not include uncertainty about the opponent ranges.
+          </p>
+        )}
+        {analysis.potOdds && (
+          <p>
+            Immediate calling threshold: {(analysis.potOdds.requiredEquity * 100).toFixed(1)}%.{' '}
+            {analysis.potOdds.explanation}
+          </p>
+        )}
         <p>{analysis.assumptions.join(' ')}</p>
-        {analysis.potOdds && <p>{analysis.potOdds.explanation}</p>}
         <p>
           {analysis.scored
-            ? `Model agreement: ${analysis.score}/100. This measures agreement with an authored policy, not GTO accuracy or measured EV.`
+            ? `Model agreement: ${analysis.score}/100. This measures agreement with the calculated training policy, not GTO accuracy or measured EV.`
             : 'No numerical strategy score is assigned to this decision.'}
         </p>
       </details>
@@ -73,6 +102,37 @@ export function DecisionReview({
     </article>
   );
 }
+
+function CoachingPoints({
+  points,
+  decisions,
+  onReplay,
+}: {
+  points: CoachingPoint[];
+  decisions: HeroDecision[];
+  onReplay: (eventIndex?: number) => void;
+}) {
+  return points.map((point) => {
+    const decision = decisions.find((item) => item.id === point.decisionId);
+    // Keep the overview compact; the complete explanation follows in the decision review.
+    const detail = point.detail
+      .split(/(?<=\.)\s+(?=[A-Z])/)
+      .slice(0, 2)
+      .join(' ');
+    return (
+      <div className="coaching-point" key={point.decisionId}>
+        <strong>{point.title}</strong>
+        <p>{detail}</p>
+        {decision && (
+          <Button variant="ghost" onClick={() => onReplay(Math.max(0, decision.eventIndex - 1))}>
+            <Play size={13} /> See the decision
+          </Button>
+        )}
+      </div>
+    );
+  });
+}
+
 export function HandReport({
   record,
   reveal,
@@ -89,7 +149,12 @@ export function HandReport({
   saved?: boolean;
 }) {
   const { report, outcome } = record;
-  const hero = record.state.players[0];
+  const teaching = report.summary ? report : summarizeHand(record.decisions);
+  const hero = record.state.players.find((player) => player.id === 'hero');
+  const dealtPlayers = record.state.players.filter((player) => player.startingStack > 0).length;
+  const keyDecision = record.decisions.find(
+    (decision) => decision.id === report.mostImportantDecisionId,
+  );
   return (
     <div className="hand-report">
       <div className="hand-result-banner">
@@ -97,9 +162,9 @@ export function HandReport({
           <span className="eyebrow">
             HAND {record.state.handNumber} · {outcome.showdown ? 'SHOWDOWN' : 'WON THROUGH FOLDS'}
           </span>
-          <h2>{outcome.won ? 'A pot comes your way.' : 'Every hand has a lesson.'}</h2>
+          <h2>Your hand, explained.</h2>
           <p>
-            {hero?.name ?? 'You'} · {record.state.players.length} players · virtual chips
+            {hero?.name ?? 'You'} · {dealtPlayers} players · virtual chips
           </p>
         </div>
         <span className="hand-net">
@@ -135,85 +200,119 @@ export function HandReport({
         </div>
       ) : (
         <>
-          <div className="report-metrics">
-            <div>
-              <strong>{report.score === null ? '—' : `${Math.round(report.score)}`}</strong>
-              <span>{report.scoreLabel} / 100</span>
-              <small>
-                {report.score === null
-                  ? 'Insufficient scoring coverage'
-                  : 'Authored policy; not GTO'}
-              </small>
+          <section className="hand-coaching-summary">
+            <p className="panel-description">
+              {teaching.summary ??
+                'Review the reasons behind your decisions, using only the information available at the time.'}
+            </p>
+            <div className="coaching-columns">
+              <section className="content-panel">
+                <h3>
+                  <CheckCircle2 size={18} /> What you did well
+                </h3>
+                {teaching.strengths?.length ? (
+                  <CoachingPoints
+                    points={teaching.strengths}
+                    decisions={record.decisions}
+                    onReplay={onReplay}
+                  />
+                ) : (
+                  <p className="panel-description">
+                    {report.scoredDecisions === 0
+                      ? 'This hand has no decisions the model can score confidently. The reviews below explain what to consider without inventing a positive grade.'
+                      : 'There is no clear model-preferred choice to highlight in this hand. Use the comparisons below to find a stronger plan.'}
+                  </p>
+                )}
+              </section>
+              <section className="content-panel">
+                <h3>
+                  <Lightbulb size={18} /> What to work on
+                </h3>
+                {teaching.improvements?.length ? (
+                  <CoachingPoints
+                    points={teaching.improvements}
+                    decisions={record.decisions}
+                    onReplay={onReplay}
+                  />
+                ) : (
+                  <p className="panel-description">
+                    {teaching.lessons[0] ??
+                      'There were no hero decisions in this hand. Play another hand to build your review.'}
+                  </p>
+                )}
+              </section>
             </div>
-            <div>
-              <strong>{Math.round(report.coverage * 100)}%</strong>
-              <span>Scoring coverage</span>
-              <small>
-                {report.scoredDecisions}/{report.totalDecisions} decisions scored
-              </small>
-            </div>
-            <div>
-              <strong>{report.totalDecisions}</strong>
-              <span>Your decisions</span>
-              <small>{report.evaluatedDecisions} reviewed</small>
-            </div>
-            <div>
-              <strong>{report.notableMistakes}</strong>
-              <span>Model disagreements</span>
-              <small>{report.strongDecisions} strong model fits</small>
-            </div>
-          </div>
-          <div className="report-coverage">
-            <ShieldCheck size={15} /> {report.method} Confidence: {report.confidence}. Chips won or
-            lost never determine your coaching score.
-          </div>
-          <div className="report-streets">
-            {report.streets.map((street) => (
-              <div key={street.street}>
-                <strong>{street.street}</strong>
-                <span>
-                  {street.assessment} · {street.scored}/{street.decisions} scored
-                </span>
-              </div>
-            ))}
-          </div>
-          {report.lessons.length > 0 && (
-            <section className="content-panel">
-              <span className="eyebrow">TAKE THIS TO YOUR NEXT HAND</span>
-              {report.lessons.map((lesson) => (
-                <p key={lesson} className="panel-description">
-                  {lesson}
+          </section>
+          {keyDecision && (
+            <div className="report-coverage key-decision-shortcut">
+              <div>
+                <strong>Start with your {keyDecision.view.table.street} decision</strong>
+                <p>
+                  This decision involved the greatest pot and calling-price weight in your review.
                 </p>
-              ))}
-            </section>
-          )}
-          {report.mostImportantDecisionId && (
-            <div className="report-coverage">
-              <strong>Key decision to revisit</strong>
-              <p>
-                The highest importance decision in this model is highlighted by its replay shortcut.
-              </p>
+              </div>
               <Button
                 variant="secondary"
-                onClick={() =>
-                  onReplay(
-                    Math.max(
-                      0,
-                      (record.decisions.find(
-                        (decision) => decision.id === report.mostImportantDecisionId,
-                      )?.eventIndex ?? 1) - 1,
-                    ),
-                  )
-                }
+                onClick={() => onReplay(Math.max(0, keyDecision.eventIndex - 1))}
               >
                 Replay key decision
                 <Play size={14} />
               </Button>
             </div>
           )}
+          <details className="report-score-details">
+            <summary>Model score, coverage & assumptions</summary>
+            <div className="report-metrics">
+              <div>
+                <strong>{report.score === null ? '—' : Math.round(report.score)}</strong>
+                <span>{report.scoreLabel} / 100</span>
+                <small>
+                  {report.score === null
+                    ? 'Insufficient scoring coverage'
+                    : 'Training model; not GTO'}
+                </small>
+              </div>
+              <div>
+                <strong>{Math.round(report.coverage * 100)}%</strong>
+                <span>Scoring coverage</span>
+                <small>
+                  {report.scoredDecisions}/{report.totalDecisions} decisions scored
+                </small>
+              </div>
+              <div>
+                <strong>{report.totalDecisions}</strong>
+                <span>Your decisions</span>
+                <small>{report.evaluatedDecisions} reviewed</small>
+              </div>
+              <div>
+                <strong>{report.notableMistakes}</strong>
+                <span>Choices to revisit</span>
+                <small>{report.strongDecisions} model-preferred choices</small>
+              </div>
+            </div>
+            <p className="panel-description">
+              {report.method} Confidence: {report.confidence}. Chips won or lost never determine
+              your coaching score.
+            </p>
+            <div className="report-streets">
+              {report.streets.map((street) => (
+                <div key={street.street}>
+                  <strong>{street.street}</strong>
+                  <span>
+                    {street.assessment} · {street.scored}/{street.decisions} scored
+                  </span>
+                </div>
+              ))}
+            </div>
+          </details>
           <div className="decision-review-list">
             {record.decisions.map((decision) => (
-              <DecisionReview key={decision.id} decision={decision} onReplay={onReplay} />
+              <DecisionReview
+                key={decision.id}
+                decision={decision}
+                onReplay={onReplay}
+                important={decision.id === report.mostImportantDecisionId}
+              />
             ))}
           </div>
           {record.decisions.length === 0 && (

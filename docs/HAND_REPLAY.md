@@ -17,7 +17,9 @@ The hero's dealt cards are visible to the hero. Other players' cards remain conc
 - Shared visual table showing seats, stacks, street commitments, pot, board, dealer, actor, folds, all-ins and winners.
 - First/previous/next/last event, play/pause, timeline scrubbing and 0.5×/1×/2× playback.
 - Street shortcuts and a selectable recorded-event list.
-- Replay of the live hand so far; opening it from the table pauses bot progression.
+- Replay of the live hand so far; opening it from the table pauses bot progression and automatic dealing.
+- Recent completed hands remain reviewable during later hands. Opening a review pauses the table until manually resumed.
+- Eliminated seats show OUT and receive no cards in subsequent hands; historical frames preserve the original dealt cards and balances.
 - Replay from a completed-hand report, progress history and saved notebook.
 - Decision links that open the decision's preceding frame, while whole-hand review can begin at the initial event.
 - Dialog focus management and accessible control labels through the existing UI primitives.

@@ -1,0 +1,123 @@
+{
+  "runDate": "2026-10-14",
+  "model": "feltlab-calculated-policy-v2",
+  "seedPrefix": "feltlab-v3-benchmark-2026-10-13",
+  "decisionTiming": {
+    "description": "30 distinct six-player flop decisions facing a bet, 128 samples, cold equity-cache entries; Node test host, not a phone/browser performance guarantee.",
+    "samples": 30,
+    "medianMilliseconds": 9.76,
+    "p95Milliseconds": 15.52,
+    "maxMilliseconds": 24.55
+  },
+  "methodology": "32 independent two-hand duplicate-deck blocks per case; policies swap seats. Stack resets to 100 BB every hand. Mean candidate net BB/hand × 100. Approximate 95% normal CI uses sample SD of paired-block means / sqrt(32). No rake. Measurements only apply against the current calculated balanced/intermediate reference. This bounded smoke benchmark is not a strength or difficulty-ranking validation.",
+  "results": [
+    {
+      "profile": "balanced",
+      "difficulty": "beginner",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": 13.28,
+      "ci95Low": -15.23,
+      "ci95High": 41.8,
+      "showdownHands": 16,
+      "foldHands": 48
+    },
+    {
+      "profile": "balanced",
+      "difficulty": "intermediate",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -2.34,
+      "ci95Low": -21.44,
+      "ci95High": 16.76,
+      "showdownHands": 13,
+      "foldHands": 51
+    },
+    {
+      "profile": "balanced",
+      "difficulty": "advanced",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -2.34,
+      "ci95Low": -21.44,
+      "ci95High": 16.76,
+      "showdownHands": 13,
+      "foldHands": 51
+    },
+    {
+      "profile": "balanced",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -2.34,
+      "ci95Low": -21.44,
+      "ci95High": 16.76,
+      "showdownHands": 13,
+      "foldHands": 51
+    },
+    {
+      "profile": "tight-aggressive",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -28.13,
+      "ci95Low": -99.48,
+      "ci95High": 43.23,
+      "showdownHands": 9,
+      "foldHands": 55
+    },
+    {
+      "profile": "loose-aggressive",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -57.81,
+      "ci95Low": -169.38,
+      "ci95High": 53.76,
+      "showdownHands": 11,
+      "foldHands": 53
+    },
+    {
+      "profile": "passive",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -7.03,
+      "ci95Low": -66.28,
+      "ci95High": 52.22,
+      "showdownHands": 35,
+      "foldHands": 29
+    },
+    {
+      "profile": "tricky",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -46.88,
+      "ci95Low": -151.3,
+      "ci95High": 57.55,
+      "showdownHands": 11,
+      "foldHands": 53
+    },
+    {
+      "profile": "exploitative",
+      "difficulty": "expert",
+      "reference": "balanced / intermediate",
+      "pairedSeeds": 32,
+      "hands": 64,
+      "meanBBPer100": -41.41,
+      "ci95Low": -129.07,
+      "ci95High": 46.26,
+      "showdownHands": 12,
+      "foldHands": 52
+    }
+  ]
+}

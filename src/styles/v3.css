@@ -9,6 +9,185 @@
   display: grid;
   gap: 10px;
 }
+.fast-forward {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid #5a7047;
+  border-radius: 7px;
+  background: #2a3c25;
+  color: #d2e7bb;
+  font-size: 12px;
+}
+.spectator-notice {
+  padding: 10px 16px;
+  background: #34402b;
+  color: #d1dcb9;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.seat-out .seat-plaque {
+  opacity: 0.5;
+  filter: saturate(0.3);
+  border-style: dashed;
+}
+.seat-out .seat-status {
+  color: #c6af89;
+  letter-spacing: 2px;
+}
+.empty-seat-mark {
+  color: #617258;
+  font-size: 20px;
+}
+.between-hands .table-action-title > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.deal-countdown {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.auto-deal-progress {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #33472a;
+  margin-top: 12px;
+}
+.auto-deal-progress > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #b3d494;
+  transform-origin: left;
+  animation: auto-deal 4s linear forwards;
+}
+@keyframes auto-deal {
+  to {
+    transform: scaleX(0);
+  }
+}
+.match-winner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 32px 22px;
+  margin-bottom: 20px;
+  background: radial-gradient(ellipse at top, #3f492c, #17251d 75%);
+  border: 1px solid #8d8451;
+  border-radius: 16px;
+}
+.match-winner > svg {
+  color: #dec583;
+}
+.match-winner h2 {
+  font-size: clamp(24px, 4vw, 36px);
+}
+.match-winner p {
+  color: #becbab;
+  font-size: 13px;
+}
+.match-standings {
+  width: min(100%, 450px);
+  margin-top: 10px;
+}
+.match-standings > div {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  padding: 13px 4px;
+  border-bottom: 1px solid #3c4b34;
+  font-size: 12px;
+}
+.match-standings strong {
+  flex: 1;
+  text-align: left;
+}
+.match-standings span {
+  color: #b9c7a5;
+}
+.recent-table-hands {
+  margin-top: 14px;
+}
+.recent-table-hands .section-heading {
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.recent-table-hands .section-heading h2 {
+  font-size: 17px;
+}
+.hand-coaching-summary {
+  padding: 22px;
+  background: linear-gradient(120deg, #263922, #19271c);
+  border: 1px solid #526a42;
+  border-radius: 12px;
+}
+.hand-coaching-summary h3 {
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+.hand-coaching-summary p {
+  color: #bdcdb0;
+  line-height: 1.85;
+  font-size: 13px;
+}
+.coaching-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 20px;
+}
+.coaching-columns h4 {
+  font-size: 13px;
+  margin-bottom: 10px;
+  color: #deead3;
+}
+.coaching-point {
+  padding: 12px 0;
+  border-top: 1px solid #475c39;
+}
+.coaching-point button {
+  font-size: 11px;
+  color: #d4e8bb;
+  min-height: 44px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.decision-review .decision-verdict {
+  color: #dfebd6;
+  font-weight: 600;
+}
+.decision-alternative {
+  padding: 12px 15px;
+  border-left: 2px solid #9ab778;
+  background: #23341f;
+}
+.key-decision {
+  border-color: #9b8b56;
+}
+.hand-report details > summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 12px 0;
+  color: #b0c29e;
+  font-size: 12px;
+}
+@media (max-width: 767px) {
+  .coaching-columns {
+    grid-template-columns: 1fr;
+  }
+  .hand-coaching-summary {
+    padding: 16px;
+  }
+  .recent-table-hands .section-heading > span {
+    font-size: 10px;
+  }
+}
 .notebook-card-actions {
   display: flex;
   align-items: center;

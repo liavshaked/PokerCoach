@@ -39,7 +39,9 @@ test('production manifest, install icons, service worker and offline practice', 
     .getByRole('button', { name: 'Fold', exact: true })
     .click();
   await expect(page.locator('.live-pot')).toContainText('HAND COMPLETE');
+  await page.getByRole('button', { name: 'Review & pause', exact: true }).click();
   await page.getByRole('button', { name: 'Save hand', exact: true }).click();
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await page.goto('/#notebook');
   await expect(page.locator('.notebook-card')).toHaveCount(1);
   await page.goto('/#ranges');

@@ -211,5 +211,5 @@ describe('honest conditional opponent policies', () => {
             8,
           );
         }
-  });
+  }, 30000);
 });

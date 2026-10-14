@@ -3,6 +3,7 @@ import type { AgentView } from '../game/types';
 import { policyDistribution } from '../agents';
 import { riverEquity } from '../equity';
 import { callEV } from '../math';
+import { coachingAction, decisionCoaching } from './coaching';
 import type {
   DecisionAnalysis,
   DecisionSnapshot,
@@ -35,7 +36,10 @@ export function decisionPotOdds(view: AgentView): PotOddsAnalysis | null {
 export function analyzeDecision(snapshot: DecisionSnapshot): DecisionAnalysis {
   const { view, chosenAction } = snapshot;
   const hero = view.table.players.find((player) => player.id === view.playerId)!;
-  const active = view.table.players.filter((player) => player.status !== 'folded');
+  const active = view.table.players.filter(
+    (player) => player.status !== 'folded' && player.stack + player.committed > 0,
+  );
+  const funded = view.table.players.filter((player) => player.stack + player.committed > 0);
   const potOdds = decisionPotOdds(view);
   const distribution = policyDistribution(view, { profile: 'balanced', difficulty: 'advanced' });
   const corresponding = distribution.options.find(
@@ -57,8 +61,13 @@ export function analyzeDecision(snapshot: DecisionSnapshot): DecisionAnalysis {
   }
   const stackBB = hero.startingStack / view.table.bigBlind;
   const allIn =
-    active.some((player) => player.status === 'all-in') || (potOdds?.toCall ?? 0) >= hero.stack;
+    active.some((player) => player.status === 'all-in') ||
+    (potOdds?.toCall ?? 0) >= hero.stack ||
+    ((chosenAction.type === 'bet' || chosenAction.type === 'raise') &&
+      (chosenAction.amount ?? 0) - hero.streetCommitted >= hero.stack);
   const scored =
+    funded.length >= 2 &&
+    funded.length <= 6 &&
     stackBB >= 40 &&
     stackBB <= 200 &&
     !allIn &&
@@ -90,24 +99,16 @@ export function analyzeDecision(snapshot: DecisionSnapshot): DecisionAnalysis {
       ? 'All-in/side-pot decisions receive a qualitative review; this policy does not provide a supported all-in range valuation.'
       : active.length > 2 && view.table.street !== 'preflop'
         ? 'Multi-way postflop ranges are too uncertain for this reference model to assign a score.'
-        : 'This stack depth is outside the authored 40–200 BB scoring scope.'
+        : 'This stack depth is outside the 40–200 BB scoring scope.'
     : null;
-  const principle =
-    view.table.street === 'preflop'
-      ? 'Use position, price, prior raises and stack depth to decide which holdings enter the pot.'
-      : active.length > 2
-        ? 'Multi-way aggression usually needs a more selective continuation model; an ordinal hand feature cannot establish your equity.'
-        : potOdds
-          ? 'A price tells you how much equity a call needs. Opponent range assumptions determine whether your holding has it.'
-          : 'Value, fold equity and board texture determine whether pressure is useful; a made hand alone does not prove a profitable bet.';
+  const coaching = decisionCoaching(snapshot, distribution, { grade, scored }, potOdds);
+  const samplingMargin = Math.min(1, distribution.calculation.equityStandardError * 1.96);
   return {
     status: 'available',
     level: scored ? 'model' : 'heuristic',
     source: {
       category: scored ? 'model-based' : 'heuristic',
-      label: scored
-        ? 'Authored policy agreement · not EV or GTO'
-        : 'Qualitative coaching · not scored',
+      label: scored ? 'Calculated training model' : 'Qualitative coaching',
     },
     model: distribution.model,
     confidence: scored ? 'medium' : 'low',
@@ -117,11 +118,13 @@ export function analyzeDecision(snapshot: DecisionSnapshot): DecisionAnalysis {
     scored,
     importance,
     recommendedActions: [{ ...distribution.recommended.action }],
-    explanation: `${distribution.reasons.join(' ')} ${limitations ?? `Your action agrees ${score}% with the highest-weight action of the authored reference policy. This measures policy agreement, not strategic correctness or EV.`}`,
-    principle,
+    explanation: `${coaching.verdict} ${coaching.why}${limitations ? ` ${limitations}` : ''}`,
+    principle: coaching.takeaway,
     assumptions: [
-      'Reference: FeltLab balanced/advanced authored range policy v1, using only public state and hero cards.',
-      'Policy weights and ordinal holding features are authored models, not solver frequencies, measured equities, or population ranges.',
+      'Reference: FeltLab balanced/advanced calculated policy v2, using only public state and hero cards.',
+      ...distribution.calculation.assumptions,
+      `Estimated showdown share uses ${distribution.calculation.samples} simulated completions. The approximate 95% sampling margin is ±${Math.round(samplingMargin * 100)} percentage points; uncertainty in the opponent range is additional and is not measured by that interval.`,
+      'Policy weights are authored choices, not solver frequencies. Estimated showdown share does not measure fold equity, realized equity, tournament payout value, or the EV of betting.',
       'Numeric scope: 40–200 BB starting depth, non-all-in preflop 2–6 players or non-all-in heads-up postflop.',
       'Agreement = chosen action weight / maximum policy action weight; aggressive sizing also receives the smaller/larger additional-risk ratio.',
       ...(limitations ? [limitations] : []),
@@ -129,6 +132,14 @@ export function analyzeDecision(snapshot: DecisionSnapshot): DecisionAnalysis {
     potOdds,
     evLoss: null,
     tags,
+    coaching,
+    estimatedEquity: {
+      share: distribution.calculation.equity,
+      samples: distribution.calculation.samples,
+      samplingMargin,
+      opponents: distribution.calculation.opponents,
+      method: distribution.calculation.method,
+    },
   };
 }
 
@@ -179,14 +190,43 @@ export function summarizeHand(decisions: readonly HeroDecision[]): HandReport {
   const lessons = [
     ...new Set(
       decisions
-        .filter((decision) => decision.analysis.grade === 'mistaken' || !decision.analysis.scored)
+        .filter((decision) => decision.analysis.grade !== 'preferred' || !decision.analysis.scored)
         .map((decision) => decision.analysis.principle),
     ),
   ].slice(0, 3);
   if (!lessons.length && decisions.length)
-    lessons.push(
-      'Preserve the distinction between agreement with an authored model and verified optimal play.',
-    );
+    lessons.push(mostImportant?.analysis.principle ?? decisions[0].analysis.principle);
+  const point = (decision: HeroDecision) => ({
+    decisionId: decision.id,
+    street: decision.view.table.street,
+    title: `${decision.view.table.street} · ${coachingAction(decision.chosenAction, decision.analysis.potOdds?.toCall ?? 0)}`,
+    detail: decision.analysis.coaching?.why ?? decision.analysis.explanation,
+  });
+  const strengths = scored
+    .filter((decision) => decision.analysis.grade === 'preferred')
+    .sort((a, b) => b.analysis.importance - a.analysis.importance)
+    .slice(0, 2)
+    .map(point);
+  const improvements = decisions
+    .filter((decision) => decision.analysis.grade !== 'preferred')
+    .sort((a, b) => {
+      const priority = (item: HeroDecision) =>
+        item.analysis.importance * (item.analysis.grade === 'mistaken' ? 2 : 1);
+      return priority(b) - priority(a);
+    })
+    .slice(0, 2)
+    .map((decision) => ({
+      ...point(decision),
+      detail:
+        `${decision.analysis.coaching?.verdict ?? ''} ${decision.analysis.coaching?.alternative ?? decision.analysis.principle}`.trim(),
+    }));
+  const clearStrengths = scored.filter(
+    (decision) => decision.analysis.grade === 'preferred',
+  ).length;
+  const reviewChoices = scored.filter((decision) => decision.analysis.grade === 'mistaken').length;
+  const summary = !decisions.length
+    ? 'You had no decisions to make in this hand, so there is no play to assess.'
+    : `${decisions.length === 1 ? 'You made one decision' : `You made ${decisions.length} decisions`} in this hand. ${clearStrengths ? `${clearStrengths === 1 ? 'One choice fits' : `${clearStrengths} choices fit`} the training model well. ` : ''}${reviewChoices ? `${reviewChoices === 1 ? 'One choice is' : `${reviewChoices} choices are`} worth a closer look. ` : ''}${decisions.length > scored.length ? `${decisions.length - scored.length} ${decisions.length - scored.length === 1 ? 'decision is' : 'decisions are'} reviewed in words because the model cannot support a score for ${decisions.length - scored.length === 1 ? 'that situation' : 'those situations'}. ` : ''}Focus on the reasons behind each choice; winning or losing this pot does not change them.`;
   return {
     score,
     scoreLabel: 'Model agreement',
@@ -223,8 +263,11 @@ export function summarizeHand(decisions: readonly HeroDecision[]): HandReport {
       };
     }),
     lessons,
+    summary,
+    strengths,
+    improvements,
     method:
-      'Confidence × decision-importance weighted authored-policy agreement. Overall number requires at least 75% count and importance coverage, and no unscored decision with importance ≥3. Outcome is never an input.',
+      'Confidence × decision-importance weighted calculated-policy agreement. Overall number requires at least 75% count and importance coverage, and no unscored decision with importance ≥3. Outcome is never an input.',
   };
 }
 

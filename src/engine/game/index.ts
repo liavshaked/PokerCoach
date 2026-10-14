@@ -758,7 +758,7 @@ export function nextHand(previous: GameState, options: NextHandOptions): GameSta
   const players = previous.players.map((player) => ({
     id: player.id,
     name: player.name,
-    stack: options.autoRebuy ? Math.max(player.stack, target) : player.stack,
+    stack: options.autoRebuy && player.stack === 0 ? target : player.stack,
   }));
   if (players.filter((player) => player.stack > 0).length < 2)
     throw new Error('Fewer than two funded seats remain. Enable auto-rebuy to continue.');

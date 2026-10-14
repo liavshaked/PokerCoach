@@ -42,7 +42,7 @@ export const defaultTableConfig: TableConfig = {
   bigBlind: 1,
   difficulty: 'advanced',
   profiles: ['tight-aggressive', 'loose-aggressive', 'balanced', 'passive', 'exploitative'],
-  autoRebuy: true,
+  autoRebuy: false,
   feedbackTiming: 'full-hand',
   botDelayMs: 650,
   heroName: 'You',
@@ -76,6 +76,10 @@ interface PersistedTable {
   session: TableSession | null;
   observations: PublicObservations;
   paused: boolean;
+}
+interface RestoreCache {
+  hands: Map<string, GameState | null>;
+  decisions: Map<GameState, HeroDecision[]>;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -129,7 +133,8 @@ export function sanitizeTableConfig(value: unknown): TableConfig {
       ? (source.difficulty as TableConfig['difficulty'])
       : 'advanced',
     profiles: profiles.length ? profiles : [...defaultTableConfig.profiles],
-    autoRebuy: typeof source.autoRebuy === 'boolean' ? source.autoRebuy : true,
+    // Kept in the saved schema for older clients; elimination tables never rebuy.
+    autoRebuy: false,
     feedbackTiming: ['instant', 'full-hand', 'session-review'].includes(
       String(source.feedbackTiming),
     )
@@ -161,8 +166,9 @@ function persistedHand(hand: CompletedHand): PersistedHand {
     completedAt: hand.completedAt,
   };
 }
-function restoreHand(value: unknown): GameState | null {
+function restoreHand(value: unknown, cache?: RestoreCache): GameState | null {
   if (typeof value !== 'string' || value.length > 500_000) return null;
+  if (cache?.hands.has(value)) return cache.hands.get(value) ?? null;
   try {
     const hand = deserializeHand(value);
     if (
@@ -171,13 +177,15 @@ function restoreHand(value: unknown): GameState | null {
       hand.events.length > 500
     )
       return null;
+    cache?.hands.set(value, hand);
     return hand;
   } catch {
+    cache?.hands.set(value, null);
     return null;
   }
 }
 
-function restoreDecisions(value: unknown, hand: GameState): HeroDecision[] {
+function restoreDecisions(value: unknown, hand: GameState, cache?: RestoreCache): HeroDecision[] {
   const metadata = new Map<number, string | null>();
   const decisions: HeroDecision[] = [];
   for (const item of (Array.isArray(value) ? value : []).slice(0, 100)) {
@@ -193,6 +201,12 @@ function restoreDecisions(value: unknown, hand: GameState): HeroDecision[] {
       continue;
     metadata.set(item.eventIndex, item.createdAt);
   }
+  const cached = cache?.decisions.get(hand);
+  if (cached)
+    return cached.map((decision) => ({
+      ...decision,
+      createdAt: metadata.get(decision.eventIndex) ?? null,
+    }));
   // The engine events establish every real hero action even if ancillary metadata was damaged.
   for (const event of hand.events) {
     if (event.type !== 'action' || event.playerId !== 'hero') continue;
@@ -212,7 +226,9 @@ function restoreDecisions(value: unknown, hand: GameState): HeroDecision[] {
       /* A bad decision cannot manufacture a new history or score. */
     }
   }
-  return decisions.sort((a, b) => a.eventIndex - b.eventIndex);
+  decisions.sort((a, b) => a.eventIndex - b.eventIndex);
+  cache?.decisions.set(hand, decisions);
+  return decisions;
 }
 
 function completedRecord(
@@ -236,7 +252,134 @@ function completedRecord(
     completedAt,
   };
 }
-function restoreRecords(value: unknown): CompletedHand[] {
+
+/** The larger entering stack finishes higher when several players bust together;
+ * equal entering stacks share a place. Zero-stack seats remain in the engine for replay. */
+function settleMatch(session: TableSession, hand: GameState, completedAt: string): TableSession {
+  if (!hand.result) return session;
+  const remaining = hand.players.filter((player) => player.stack > 0);
+  const busted = hand.players.filter((player) => player.startingStack > 0 && player.stack === 0);
+  const known = new Set(session.eliminations.map((entry) => entry.playerId));
+  const eliminations = [
+    ...session.eliminations,
+    ...busted
+      .filter((player) => !known.has(player.id))
+      .map((player) => ({
+        playerId: player.id,
+        handNumber: hand.handNumber,
+        place:
+          remaining.length +
+          1 +
+          busted.filter((other) => other.startingStack > player.startingStack).length,
+      })),
+  ];
+  return {
+    ...session,
+    eliminations,
+    ...(remaining.length === 1 && session.endedReason !== 'left'
+      ? {
+          winnerId: remaining[0].id,
+          endedAt: session.endedAt ?? completedAt,
+          endedReason: 'winner' as const,
+        }
+      : {}),
+  };
+}
+
+function completedProgress(
+  current: Pick<TableState, 'hands' | 'totals'>,
+  hand: GameState,
+  decisions: HeroDecision[],
+  session: TableSession,
+): Pick<TableState, 'hands' | 'session' | 'totals'> {
+  if (!hand.result) return { hands: current.hands, session, totals: current.totals };
+  const existing = current.hands.find((record) => record.id === hand.id);
+  const completed = existing ?? completedRecord(hand, decisions, session.id);
+  return {
+    hands: existing ? current.hands : [completed, ...current.hands].slice(0, RECENT_HAND_LIMIT),
+    session: settleMatch(
+      {
+        ...session,
+        handsCompleted: session.handsCompleted + (existing ? 0 : 1),
+        heroNet: session.heroNet + (existing ? 0 : completed.outcome.heroNet),
+      },
+      hand,
+      completed.completedAt,
+    ),
+    totals: {
+      ...current.totals,
+      hands: current.totals.hands + (existing ? 0 : 1),
+      heroNet: current.totals.heroNet + (existing ? 0 : completed.outcome.heroNet),
+    },
+  };
+}
+
+function reconcileMatch(
+  session: TableSession | null,
+  currentHand: GameState | null,
+  hands: CompletedHand[],
+): TableSession | null {
+  if (!session || !currentHand) return session;
+  // An all-in player is still in the match until the pot has actually been awarded.
+  const out = new Set(
+    currentHand.players
+      .filter((player) => (currentHand.result ? player.stack === 0 : player.startingStack === 0))
+      .map((player) => player.id),
+  );
+  const seen = new Set<string>();
+  let restored: TableSession = {
+    ...session,
+    winnerId: null,
+    eliminations: session.eliminations.filter((entry) => {
+      if (
+        !out.has(entry.playerId) ||
+        seen.has(entry.playerId) ||
+        entry.handNumber > currentHand.handNumber
+      )
+        return false;
+      seen.add(entry.playerId);
+      return true;
+    }),
+  };
+  const history = hands
+    .filter(
+      (hand) => hand.sessionId === session.id && hand.state.handNumber <= currentHand.handNumber,
+    )
+    .sort((a, b) => a.state.handNumber - b.state.handNumber);
+  for (const completed of history) {
+    // Old cash-table sessions may have rebought a player after an earlier bust.
+    // A later funded hand supersedes that earlier elimination in legacy history.
+    restored.eliminations = restored.eliminations.filter(
+      (entry) =>
+        entry.handNumber >= completed.state.handNumber ||
+        !completed.state.players.some(
+          (player) => player.id === entry.playerId && player.startingStack > 0,
+        ),
+    );
+    const settled = settleMatch(
+      { ...restored, endedReason: 'left' },
+      completed.state,
+      completed.completedAt,
+    );
+    restored.eliminations = settled.eliminations.filter((entry) => out.has(entry.playerId));
+  }
+  if (currentHand.result) restored = settleMatch(restored, currentHand, new Date().toISOString());
+  // Old saves may predate the retained hand window. A zero hand number explicitly means
+  // the elimination hand is unknown; never invent a precise historical finish order.
+  for (const playerId of out) {
+    if (!restored.eliminations.some((entry) => entry.playerId === playerId)) {
+      restored.eliminations.push({
+        playerId,
+        handNumber: 0,
+        place: currentHand.players.length - out.size + 1,
+      });
+    }
+  }
+  if (restored.endedReason === 'winner' && !restored.winnerId)
+    restored.endedReason = restored.endedAt ? 'left' : null;
+  return restored;
+}
+function restoreRecords(value: unknown, cache?: RestoreCache): CompletedHand[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const restored: CompletedHand[] = [];
@@ -249,12 +392,12 @@ function restoreRecords(value: unknown): CompletedHand[] {
       seen.has(item.id)
     )
       continue;
-    const hand = restoreHand(item.hand);
+    const hand = restoreHand(item.hand, cache);
     if (!hand?.result || hand.id !== item.id) continue;
     restored.push(
       completedRecord(
         hand,
-        restoreDecisions(item.decisions, hand),
+        restoreDecisions(item.decisions, hand, cache),
         item.sessionId,
         item.completedAt,
       ),
@@ -275,7 +418,7 @@ function cleanTags(value: unknown): string[] {
       ].slice(0, 12)
     : [];
 }
-function restoreSaved(value: unknown): SavedFullHand[] {
+function restoreSaved(value: unknown, cache?: RestoreCache): SavedFullHand[] {
   if (!Array.isArray(value)) return [];
   const restored: SavedFullHand[] = [];
   const seen = new Set<string>();
@@ -290,11 +433,11 @@ function restoreSaved(value: unknown): SavedFullHand[] {
       seen.has(item.handId)
     )
       continue;
-    const hand = restoreHand(item.hand);
+    const hand = restoreHand(item.hand, cache);
     if (!hand?.result || hand.id !== item.handId) continue;
     const completed = completedRecord(
       hand,
-      restoreDecisions(item.decisions, hand),
+      restoreDecisions(item.decisions, hand, cache),
       item.sessionId,
       item.completedAt,
     );
@@ -325,6 +468,27 @@ function restoreSession(value: unknown): TableSession | null {
     policySeed: validString(value.policySeed, 150) ? value.policySeed : freshId('policy'),
     startedAt: value.startedAt,
     endedAt: validDate(value.endedAt) ? value.endedAt : null,
+    winnerId: validString(value.winnerId, 100) ? value.winnerId : null,
+    endedReason:
+      value.endedReason === 'winner' || value.endedReason === 'left'
+        ? value.endedReason
+        : validDate(value.endedAt)
+          ? 'left'
+          : null,
+    eliminations: Array.isArray(value.eliminations)
+      ? value.eliminations
+          .filter(
+            (item): item is TableSession['eliminations'][number] =>
+              record(item) &&
+              validString(item.playerId, 100) &&
+              Number.isInteger(item.handNumber) &&
+              Number(item.handNumber) >= 0 &&
+              Number.isInteger(item.place) &&
+              Number(item.place) >= 2 &&
+              Number(item.place) <= 6,
+          )
+          .slice(0, 5)
+      : [],
     handsStarted: Math.floor(boundedNumber(value.handsStarted, 0, 0, 1e8)),
     handsCompleted: Math.floor(boundedNumber(value.handsCompleted, 0, 0, 1e8)),
     decisions: Math.floor(boundedNumber(value.decisions, 0, 0, 1e9)),
@@ -359,10 +523,14 @@ function restoreObservations(value: unknown): PublicObservations {
 export function sanitizeTableData(value: unknown): Omit<TableState, 'storageAvailable'> {
   const defaults = defaultState();
   if (!record(value)) return defaults;
-  const session = restoreSession(value.session);
-  const currentHand = session ? restoreHand(value.currentHand) : null;
-  const hands = restoreRecords(value.hands);
-  const savedHands = restoreSaved(value.savedHands);
+  // Current, recent and notebook entries often reference the exact same hand.
+  // Rebuild authoritative analysis once per unique history, never from saved scores.
+  const cache: RestoreCache = { hands: new Map(), decisions: new Map() };
+  let session = restoreSession(value.session);
+  const currentHand = session ? restoreHand(value.currentHand, cache) : null;
+  const hands = restoreRecords(value.hands, cache);
+  session = reconcileMatch(session, currentHand, hands);
+  const savedHands = restoreSaved(value.savedHands, cache);
   const knownStates = new Map<string, GameState>();
   for (const hand of [...hands, ...savedHands]) knownStates.set(hand.state.id, hand.state);
   if (currentHand) knownStates.set(currentHand.id, currentHand);
@@ -401,7 +569,7 @@ export function sanitizeTableData(value: unknown): Omit<TableState, 'storageAvai
     config,
     session,
     currentHand,
-    decisions: currentHand ? restoreDecisions(value.decisions, currentHand) : [],
+    decisions: currentHand ? restoreDecisions(value.decisions, currentHand, cache) : [],
     hands,
     savedHands,
     observations: restoreObservations(value.observations),
@@ -503,21 +671,12 @@ export const useTableStore = create<TableStore>()(
             ...current.totals,
             decisions: current.totals.decisions + (heroAction ? 1 : 0),
           };
-          let hands = current.hands;
-          if (next.result && !hands.some((record) => record.id === next.id)) {
-            const completed = completedRecord(next, decisions, session.id);
-            hands = [completed, ...hands].slice(0, RECENT_HAND_LIMIT);
-            session.handsCompleted += 1;
-            session.heroNet += completed.outcome.heroNet;
-            totals.hands += 1;
-            totals.heroNet += completed.outcome.heroNet;
-          }
+          const progress = completedProgress({ ...current, totals }, next, decisions, session);
           set({
             currentHand: next,
             decisions,
-            hands,
-            session,
-            totals,
+            ...progress,
+            paused: Boolean(progress.session?.endedAt),
             observations: observePublicAction(current.observations, view, event.action),
             error: null,
           });
@@ -532,12 +691,7 @@ export const useTableStore = create<TableStore>()(
         storageAvailable: detectStorage(),
         startSession(config = {}, seed = freshId('table')) {
           const previous = get();
-          if (
-            previous.currentHand &&
-            !previous.currentHand.result &&
-            previous.session &&
-            !previous.session.endedAt
-          ) {
+          if (previous.session && !previous.session.endedAt && previous.currentHand) {
             set({ error: 'End the current session before starting a new table.' });
             return false;
           }
@@ -568,23 +722,28 @@ export const useTableStore = create<TableStore>()(
               buttonSeat: 0,
               handNumber: 1,
             });
+            const session: TableSession = {
+              id,
+              seed,
+              policySeed: freshId('policy'),
+              startedAt: new Date().toISOString(),
+              endedAt: null,
+              endedReason: null,
+              winnerId: null,
+              eliminations: [],
+              handsStarted: 1,
+              handsCompleted: 0,
+              decisions: 0,
+              heroNet: 0,
+            };
+            const progress = completedProgress(previous, hand, [], session);
             set({
               config: settings,
               currentHand: hand,
               decisions: [],
-              paused: false,
+              paused: Boolean(progress.session?.endedAt),
               error: null,
-              session: {
-                id,
-                seed,
-                policySeed: freshId('policy'),
-                startedAt: new Date().toISOString(),
-                endedAt: null,
-                handsStarted: 1,
-                handsCompleted: 0,
-                decisions: 0,
-                heroNet: 0,
-              },
+              ...progress,
             });
             return true;
           } catch (error) {
@@ -592,28 +751,36 @@ export const useTableStore = create<TableStore>()(
             return false;
           }
         },
-        nextHand() {
+        nextHand(expectedToken) {
           const current = get();
-          if (!current.currentHand?.result || !current.session || current.session.endedAt)
+          if (
+            !current.currentHand?.result ||
+            !current.session ||
+            current.session.endedAt ||
+            current.paused ||
+            (expectedToken !== undefined && expectedToken !== decisionToken(current.currentHand))
+          )
             return false;
           try {
             const hand = createNextHand(current.currentHand, {
               seed: `${current.session.seed}:${current.session.handsStarted + 1}`,
-              autoRebuy: current.config.autoRebuy,
-              startingStack: current.config.startingStack * current.currentHand.config.bigBlind,
+              autoRebuy: false,
+            });
+            const progress = completedProgress(current, hand, [], {
+              ...current.session,
+              handsStarted: current.session.handsStarted + 1,
             });
             set({
               currentHand: hand,
               decisions: [],
-              paused: false,
+              paused: Boolean(progress.session?.endedAt),
               error: null,
-              session: { ...current.session, handsStarted: current.session.handsStarted + 1 },
+              ...progress,
             });
             return true;
           } catch (error) {
             set({
-              error:
-                error instanceof Error ? error.message : 'Rebuy is required before the next hand.',
+              error: error instanceof Error ? error.message : 'Unable to deal the next hand.',
             });
             return false;
           }
@@ -657,6 +824,43 @@ export const useTableStore = create<TableStore>()(
             return false;
           }
         },
+        fastForward(expectedToken) {
+          const current = get();
+          if (
+            !current.currentHand ||
+            decisionToken(current.currentHand) !== expectedToken ||
+            current.currentHand.actorId === 'hero' ||
+            current.currentHand.result ||
+            current.paused ||
+            !current.session ||
+            current.session.endedAt
+          )
+            return false;
+          let advanced = false;
+          // A finite bound protects the UI even if a future policy/engine regression loops.
+          // Each action uses the same public view and deterministic policy as normal playback.
+          for (let step = 0; step < 300; step += 1) {
+            const state = get();
+            const hand = state.currentHand;
+            if (
+              !hand ||
+              hand.result ||
+              hand.actorId === 'hero' ||
+              state.paused ||
+              state.session?.endedAt
+            )
+              return advanced;
+            if (!state.stepBot(decisionToken(hand))) return advanced;
+            advanced = true;
+          }
+          const hand = get().currentHand;
+          if (hand && !hand.result && hand.actorId !== 'hero')
+            set({
+              paused: true,
+              error: 'Fast-forward paused after 300 actions. Resume to continue.',
+            });
+          return advanced;
+        },
         pause() {
           set({ paused: true });
         },
@@ -666,12 +870,15 @@ export const useTableStore = create<TableStore>()(
         endSession() {
           const session = get().session;
           if (session && !session.endedAt)
-            set({ session: { ...session, endedAt: new Date().toISOString() }, paused: true });
+            set({
+              session: { ...session, endedAt: new Date().toISOString(), endedReason: 'left' },
+              paused: true,
+            });
         },
         updateConfig(config) {
           const current = get();
           const next = sanitizeTableConfig({ ...current.config, ...config });
-          // Table structure applies at a new session; timing, feedback and rebuy can change live.
+          // Table structure applies at a new session; timing and feedback can change live.
           if (current.currentHand && current.session && !current.session.endedAt) {
             set({
               config: {

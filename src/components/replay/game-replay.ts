@@ -22,6 +22,7 @@ export function tableView(state: PublicGameState, heroSeat = 0): TableViewState 
       cards: player.revealedCards,
       folded: player.status === 'folded',
       allIn: player.status === 'all-in',
+      eliminated: player.startingStack === 0 || (Boolean(state.result) && player.stack === 0),
       winner: state.result?.winnerIds.includes(player.id),
       action: player.lastAction
         ? `${player.lastAction.type}${player.lastAction.amount === undefined ? '' : ` ${player.lastAction.amount}`}`

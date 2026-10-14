@@ -12,6 +12,7 @@ export interface SeatView {
   cards?: Card[];
   folded: boolean;
   allIn: boolean;
+  eliminated?: boolean;
   action?: string;
   profile?: string;
   winner?: boolean;
@@ -54,7 +55,7 @@ export function TableView({
   return (
     <div
       className={`live-table table-${state.seats.length} ${replay ? 'table-replaying' : ''}`}
-      aria-label={`${state.seats.length}-player poker table`}
+      aria-label={`${state.seats.length}-seat poker table`}
       data-street={state.street}
     >
       <div className="live-felt">
@@ -96,7 +97,7 @@ export function TableView({
         <div
           key={seat.seat}
           style={{ gridArea: areas[index] }}
-          className={`live-seat ${seat.seat === state.heroSeat ? 'seat-hero' : ''} ${seat.folded ? 'seat-folded' : ''} ${state.actingSeat === seat.seat && !state.completed ? 'seat-acting' : ''} ${highlightSeat === seat.seat ? 'seat-highlight' : ''} ${seat.winner ? 'seat-winner' : ''}`}
+          className={`live-seat ${seat.seat === state.heroSeat ? 'seat-hero' : ''} ${seat.eliminated ? 'seat-out' : seat.folded ? 'seat-folded' : ''} ${state.actingSeat === seat.seat && !state.completed ? 'seat-acting' : ''} ${highlightSeat === seat.seat ? 'seat-highlight' : ''} ${seat.winner ? 'seat-winner' : ''}`}
           data-seat={seat.seat}
         >
           <div className="seat-cards" aria-label={`${seat.name} cards`}>
@@ -109,6 +110,10 @@ export function TableView({
                   index={i}
                 />
               ))
+            ) : seat.eliminated ? (
+              <span className="empty-seat-mark" aria-label="Eliminated seat">
+                —
+              </span>
             ) : (
               <>
                 <PlayingCard hidden small />
@@ -141,12 +146,14 @@ export function TableView({
             )}
           </div>
           <div className="seat-status">
-            {seat.folded
-              ? 'Folded'
-              : seat.allIn
-                ? 'All-in'
-                : (seat.action ??
-                  (state.actingSeat === seat.seat ? 'To act' : (seat.profile ?? 'Ready')))}
+            {seat.eliminated
+              ? 'OUT'
+              : seat.folded
+                ? 'Folded'
+                : seat.allIn
+                  ? 'All-in'
+                  : (seat.action ??
+                    (state.actingSeat === seat.seat ? 'To act' : (seat.profile ?? 'Ready')))}
           </div>
           {seat.bet > 0 && (
             <motion.div

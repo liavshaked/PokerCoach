@@ -36,7 +36,7 @@ async function playHand(page: Page) {
     await expect
       .poll(
         async () =>
-          (await page.getByRole('button', { name: 'Next hand →', exact: true }).count()) ||
+          (await page.getByTestId('hand-complete').count()) ||
           (await page
             .locator('.table-action-title strong')
             .filter({ hasText: 'Your decision' })
@@ -44,12 +44,16 @@ async function playHand(page: Page) {
         { timeout: 15000 },
       )
       .toBeGreaterThan(0);
-    if (await page.getByRole('button', { name: 'Next hand →', exact: true }).count()) return;
+    if (await page.getByTestId('hand-complete').count()) return;
     const check = page
       .locator('.table-action-buttons')
       .getByRole('button', { name: 'Check', exact: true });
     const call = page.locator('.table-action-buttons').getByRole('button', { name: /^Call / });
-    if (await check.count()) await check.click();
+    const fold = page
+      .locator('.table-action-buttons')
+      .getByRole('button', { name: 'Fold', exact: true });
+    if (await fold.count()) await fold.click();
+    else if (await check.count()) await check.click();
     else if (await call.count()) await call.click();
     else await page.locator('.table-action-buttons button').first().click();
   }
@@ -77,6 +81,7 @@ test('complete 2, 3, and 6-player hands, continue, replay, save notes, and resto
     await page.getByRole('button', { name: 'Take a seat', exact: true }).click();
     await expect(page.locator('.ai-game-panel .live-seat')).toHaveCount(count);
     await playHand(page);
+    await page.getByRole('button', { name: 'Review & pause', exact: true }).click();
     await page.getByRole('button', { name: 'Save hand', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Hand saved', exact: true })).toBeDisabled();
     await page.getByRole('button', { name: 'Replay hand', exact: true }).click();
@@ -85,7 +90,8 @@ test('complete 2, 3, and 6-player hands, continue, replay, save notes, and resto
     await page.getByRole('button', { name: 'Last action', exact: true }).click();
     await expect(page.getByRole('dialog').locator('.live-pot')).toContainText('HAND COMPLETE');
     await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
-    await page.getByRole('button', { name: 'Next hand →', exact: true }).click();
+    await expect(page.locator('.ai-toolbar')).toContainText('HAND 1');
+    await page.getByRole('button', { name: 'Resume', exact: true }).click();
     await expect(page.locator('.ai-toolbar')).toContainText('HAND 2');
     await page.reload();
     await expect(page.locator('.ai-toolbar')).toContainText('HAND 2');
@@ -119,9 +125,11 @@ test('session review hides answers across table, progress, notebook, and practic
   await page.getByLabel('Feedback timing').selectOption('session-review');
   await page.getByRole('button', { name: 'Take a seat', exact: true }).click();
   await playHand(page);
+  await page.getByRole('button', { name: 'Review & pause', exact: true }).click();
   await expect(page.locator('.pending-review')).toBeVisible();
   await expect(page.locator('.decision-review')).toHaveCount(0);
   await page.getByRole('button', { name: 'Save hand', exact: true }).click();
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await page.goto('/#progress');
   await expect(page.getByRole('heading', { name: 'Your review is waiting.' })).toBeVisible();
   await page.goto('/#notebook');

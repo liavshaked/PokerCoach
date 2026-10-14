@@ -2,6 +2,8 @@ import type { Card } from '../../types/poker';
 import type { AgentView, GameAction, LegalGameAction } from '../game/types';
 import { evaluateHand } from '../equity';
 import { preflopStrength } from '../ranges';
+import { estimateSituation, type SituationCalculation } from './calculation';
+export { estimateSituation, type SituationCalculation } from './calculation';
 
 export type AgentDifficulty = 'beginner' | 'intermediate' | 'advanced' | 'expert';
 export type AgentProfileId =
@@ -129,8 +131,9 @@ export interface PolicyDistribution {
   options: PolicyOption[];
   recommended: PolicyOption;
   features: HoldingFeatures;
+  calculation: SituationCalculation;
   reasons: string[];
-  model: 'feltlab-range-policy-v1';
+  model: 'feltlab-calculated-policy-v2';
   adaptation: string | null;
 }
 
@@ -165,7 +168,7 @@ export function holdingFeatures(
   }
   const pairedBoard = [...counts.values()].some((count) => count > 1);
   const all = [...holeCards, ...board];
-  const flushDraw =
+  let flushDraw =
     board.length < 5 &&
     all.some(
       (card) =>
@@ -204,6 +207,9 @@ export function holdingFeatures(
       pairedBoard,
     };
   const solved = evaluateHand(all);
+  // Do not describe an already stronger made hand as needing a lesser draw to improve.
+  if (solved.rank >= 5) straightDraw = false;
+  if (solved.rank >= 6) flushDraw = false;
   let strength = [0.0, 0.16, 0.4, 0.72, 0.84, 0.9, 0.94, 0.98, 0.995, 1][solved.rank] ?? 0.2;
   const ownPair = holeCards[0].rank === holeCards[1].rank;
   const boardHigh = Math.max(...board.map(valueOf));
@@ -243,11 +249,12 @@ export function holdingFeatures(
   };
 }
 
-export function actionLabel(action: GameAction): string {
+export function actionLabel(action: GameAction, bigBlind = 1): string {
+  const amount = Number(((action.amount ?? 0) / bigBlind).toFixed(2));
   return action.type === 'bet'
-    ? `Bet ${action.amount} BB`
+    ? `Bet ${amount} BB`
     : action.type === 'raise'
-      ? `Raise to ${action.amount} BB`
+      ? `Raise to ${amount} BB`
       : action.type[0].toUpperCase() + action.type.slice(1);
 }
 
@@ -295,9 +302,12 @@ export function policyDistribution(
   const profile = agentProfiles.find((item) => item.id === context.profile);
   if (!profile) throw new Error('Unsupported opponent profile.');
   const hero = view.table.players.find((player) => player.id === view.playerId)!;
-  const active = view.table.players.filter((player) => player.status !== 'folded');
+  const active = view.table.players.filter(
+    (player) => player.status !== 'folded' && player.stack + player.committed > 0,
+  );
+  const calculation = estimateSituation(view);
   const call = view.legalActions.find((action) => action.type === 'call')?.amount ?? 0;
-  const price = call / Math.max(view.table.pot + call, view.table.bigBlind);
+  const price = calculation.requiredEquity ?? 0;
   const raises = view.table.events.filter(
     (event) =>
       event.type === 'action' &&
@@ -315,11 +325,21 @@ export function policyDistribution(
           ? 2
           : 3;
   const late = hero.position.startsWith('BTN') || hero.position === 'CO';
-  const effectiveStack = Math.min(
-    hero.stack,
-    Math.max(0, ...active.filter((player) => player.id !== hero.id).map((player) => player.stack)),
-  );
-  const spr = effectiveStack / Math.max(view.table.pot, view.table.bigBlind);
+  const spr = calculation.spr;
+  const terminalCall =
+    call >= hero.stack ||
+    active.every((player) => player.id === hero.id || player.status === 'all-in');
+  // This discount is a strategy assumption about realizing showdown equity through future betting.
+  // It never changes the reported sampled equity or exact pot-odds price.
+  const realization =
+    terminalCall || view.table.street === 'river'
+      ? 1
+      : clamp(
+          (calculation.inPosition ? 0.94 : 0.85) - Math.max(0, active.length - 2) * 0.025,
+          0.65,
+          1,
+        );
+  const usableEquity = calculation.equity * realization;
   let bluff = profile.bluff;
   let tolerance = profile.callTolerance + (sophistication === 0 ? 0.08 : 0);
   let adaptation: string | null = null;
@@ -357,18 +377,31 @@ export function policyDistribution(
       profile.openFloor +
       (sophistication > 0 ? (late ? -4 : active.length >= 5 ? 3 : 0) : 0) +
       (facingRaise ? 5 + Math.max(0, raises - 1) * 5 : 0);
-    const continueProbability = sigmoid(
+    const structureContinue = sigmoid(
       (features.preflopScore - floor) / 3.5 - Math.max(0, price - 0.3) * 4 + tolerance * 8,
     );
+    const equityContinue = sigmoid((usableEquity - price - 0.045 + tolerance) * 18);
+    const continueProbability = terminalCall
+      ? equityContinue
+      : clamp(structureContinue * (0.45 + 0.55 * equityContinue));
     const aceBlocker = view.holeCards.some((card) => card.rank === 'A');
     const raiseFloor = facingRaise
       ? profile.threeBetFloor + (sophistication === 3 ? (aceBlocker ? -2 : raises > 1 ? 2 : 0) : 0)
       : floor + 2;
     aggressiveWeight = sigmoid((features.preflopScore - raiseFloor) / 3) * profile.aggression;
-    passiveWeight =
-      call > 0 ? continueProbability * (1 - aggressiveWeight * 0.6) : 1 - aggressiveWeight;
+    // Risk larger raises only with enough sampled showdown strength or a small authored bluff allowance.
+    const aggressiveEquity = sigmoid(
+      (calculation.equity - 1 / Math.max(active.length, 2) - 0.09) * 14,
+    );
+    aggressiveWeight *= 0.1 + 0.9 * aggressiveEquity;
+    passiveWeight = call > 0 ? continueProbability * (1 - aggressiveWeight) : 1 - aggressiveWeight;
     foldWeight = call > 0 ? (1 - continueProbability) * (facingRaise ? 1.3 : 0.8) : 0.001;
-    if (call > view.table.bigBlind * 20 && features.preflopScore < 50 && sophistication > 0) {
+    if (
+      !terminalCall &&
+      call > view.table.bigBlind * 20 &&
+      features.preflopScore < 50 &&
+      sophistication > 0
+    ) {
       foldWeight *= 3;
       aggressiveWeight *= 0.12;
       passiveWeight *= 0.2;
@@ -385,20 +418,24 @@ export function policyDistribution(
       sophistication > 0 && view.table.street !== 'river'
         ? (features.flushDraw ? 0.12 : 0) + (features.straightDraw ? 0.08 : 0)
         : 0;
-    const multiway = sophistication > 1 ? Math.max(0, active.length - 2) * 0.055 : 0;
-    const pressure = sophistication > 1 ? Math.min(0.13, Math.max(0, raises - 1) * 0.055) : 0;
-    const strength = clamp(features.strength + draw - multiway - pressure);
-    const continueProbability = sigmoid((strength - (0.29 + price * 0.7 - tolerance)) * 12);
-    passiveWeight = call > 0 ? continueProbability : Math.max(0.15, 1 - features.strength);
+    const multiway = Math.max(0, active.length - 2) * 0.025;
+    const pressure = sophistication > 1 ? Math.min(0.06, Math.max(0, raises - 1) * 0.025) : 0;
+    const uncertaintyMargin =
+      sophistication > 0 ? Math.min(0.05, calculation.equityStandardError * 0.7) : 0;
+    const continueProbability = sigmoid(
+      (usableEquity - price - uncertaintyMargin - pressure + tolerance) * 20,
+    );
+    passiveWeight = call > 0 ? continueProbability : 1;
     foldWeight =
       call > 0 ? (1 - continueProbability) * (1 + Math.max(0, active.length - 2) * 0.15) : 0.001;
-    const value = sigmoid((features.strength - (0.64 + multiway)) * 14);
+    const value = sigmoid((calculation.equity - (0.61 + multiway)) * 18);
     if (sophistication === 3) bluff *= features.nutFlushBlocker ? 1.4 : draw > 0.05 ? 1.1 : 0.65;
     const credibleDraw =
       draw > 0.05 ? 0.6 : features.nutFlushBlocker && sophistication > 1 ? 0.4 : 0.13;
     aggressiveWeight =
       profile.aggression * value + (bluff * credibleDraw) / Math.max(1, active.length - 1);
-    if (call > 0) aggressiveWeight *= value + draw;
+    if (call > 0) aggressiveWeight *= value + draw * calculation.equity;
+    else passiveWeight = Math.max(0.08, 1 - aggressiveWeight * 0.85);
     if (
       context.profile === 'tricky' &&
       call === 0 &&
@@ -406,14 +443,27 @@ export function policyDistribution(
       view.table.street === 'flop'
     )
       aggressiveWeight *= 0.6;
-    if (sophistication > 1 && features.wetBoard && features.strength < 0.6 && call > 0)
+    if (sophistication > 1 && features.wetBoard && calculation.equity < 0.4 && call > 0)
       passiveWeight *= 0.8;
-    if (spr < 1 && features.strength > 0.75) aggressiveWeight *= 1.3;
+    if (spr < 1 && calculation.equity > 0.7) aggressiveWeight *= 1.3;
     reasons.push(
       `${features.madeHand}; ${active.length}-way pot${draw ? ', potential draws' : ''}${features.wetBoard ? ', coordinated board' : ''}.`,
     );
-    reasons.push('Holding strength is an ordinal feature, not a computed equity estimate.');
   }
+  reasons.push(
+    `${Math.round(calculation.equity * 100)}% estimated showdown share from ${calculation.samples} samples against ${calculation.opponents} publicly modeled opponent${calculation.opponents === 1 ? '' : 's'}.`,
+  );
+  if (call > 0)
+    reasons.push(
+      `The call risks ${Number(call.toFixed(2))} chips to contest ${Number(calculation.eligiblePot.toFixed(2))} currently eligible chips; the immediate break-even price is ${Math.round(price * 100)}%.`,
+    );
+  if (!terminalCall && view.table.street !== 'river')
+    reasons.push(
+      `Future betting and ${calculation.inPosition ? 'acting last' : 'acting before an opponent'} affect how much showdown equity this policy expects to realize.`,
+    );
+  reasons.push(
+    'Opponent ranges and future-betting adjustments are model assumptions, not known hands, solved frequencies or verified EV.',
+  );
   for (const legal of view.legalActions) {
     if (legal.type === 'fold')
       weights.push({ action: { type: 'fold' }, weight: Math.max(0.001, foldWeight) });
@@ -422,7 +472,10 @@ export function policyDistribution(
     if (legal.type === 'call')
       weights.push({ action: { type: 'call' }, weight: Math.max(0.001, passiveWeight) });
     if (legal.type === 'bet' || legal.type === 'raise') {
-      const total =
+      const valueFraction = calculation.equity > 0.8 ? 0.15 : calculation.equity < 0.55 ? -0.12 : 0;
+      const textureFraction = features.wetBoard && calculation.equity > 0.62 ? 0.12 : 0;
+      const fraction = clamp(profile.betFraction + valueFraction + textureFraction, 0.28, 0.95);
+      let total =
         view.table.street === 'preflop'
           ? view.table.currentBet > view.table.bigBlind * 1.01
             ? view.table.currentBet * (late ? 3 : 3.5)
@@ -431,7 +484,10 @@ export function policyDistribution(
                 (event) => event.street === 'preflop' && event.action?.type === 'call',
               ).length *
                 view.table.bigBlind
-          : hero.streetCommitted + call + (view.table.pot + call) * profile.betFraction;
+          : hero.streetCommitted + call + (view.table.pot + call) * fraction;
+      // Short-stack value hands use a legal commitment size instead of leaving a token stack behind.
+      if (spr < 1.2 && calculation.equity > 0.72 && context.profile !== 'passive')
+        total = hero.streetCommitted + hero.stack;
       const amount = legalSize(legal, total, view.table.chipUnit);
       weights.push({
         action: { type: legal.type, amount },
@@ -443,12 +499,20 @@ export function policyDistribution(
   const options = weights.map((option) => ({
     ...option,
     probability: option.weight / totalWeight,
-    label: actionLabel(option.action),
+    label: actionLabel(option.action, view.table.bigBlind),
   }));
   const recommended = options.reduce((best, option) =>
     option.weight > best.weight ? option : best,
   );
-  return { options, recommended, features, reasons, model: 'feltlab-range-policy-v1', adaptation };
+  return {
+    options,
+    recommended,
+    features,
+    calculation,
+    reasons,
+    model: 'feltlab-calculated-policy-v2',
+    adaptation,
+  };
 }
 
 function legalSize(legal: LegalGameAction, target: number, chipUnit: number): number {

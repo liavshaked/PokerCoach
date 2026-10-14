@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyAction, createHand, getLegalActions } from '../../engine/game';
+import {
+  applyAction,
+  createHand,
+  getLegalActions,
+  type AgentView,
+  type GameAction,
+} from '../../engine/game';
+import { createDeck } from '../../engine/cards';
+import type { Card } from '../../types/poker';
 import * as agents from '../../engine/agents';
+import * as analysis from '../../engine/analysis';
 import { decisionToken, canRevealAnalysis, canRevealHandRecord } from './types';
 import {
   defaultTableConfig,
@@ -59,6 +68,57 @@ function finishHand() {
   }
 }
 
+const passiveAction = (view: AgentView): GameAction => ({
+  type: view.legalActions.some((action) => action.type === 'check') ? 'check' : 'call',
+});
+const shoveAction = (view: AgentView): GameAction => {
+  const aggressive = view.legalActions.find(
+    (action) => action.type === 'raise' || action.type === 'bet',
+  );
+  return aggressive
+    ? { type: aggressive.type, amount: aggressive.maxAmount ?? aggressive.amount }
+    : passiveAction(view);
+};
+
+/** Bot 1's aces win an unpaired, non-flush board; every event still comes from the engine. */
+function riggedHand(stacks: number[], handNumber = 1) {
+  const ranks: Card['rank'][] = ['K', 'A', 'Q', 'J', '9', '7'];
+  const slots = new Map<number, Card>();
+  const order = Array.from(
+    { length: stacks.length },
+    (_, offset) => (offset + 1) % stacks.length,
+  ).filter((seat) => stacks[seat] > 0);
+  for (const [offset, seat] of order.entries()) {
+    slots.set(offset, { rank: ranks[seat], suit: 'clubs' });
+    slots.set(offset + order.length, { rank: ranks[seat], suit: 'hearts' });
+  }
+  const board: Card[] = [
+    { rank: '2', suit: 'diamonds' },
+    { rank: '4', suit: 'hearts' },
+    { rank: '6', suit: 'spades' },
+    { rank: '8', suit: 'diamonds' },
+    { rank: 'T', suit: 'clubs' },
+  ];
+  const start = order.length * 2;
+  [start + 1, start + 2, start + 3, start + 5, start + 7].forEach((slot, index) =>
+    slots.set(slot, board[index]),
+  );
+  const remaining = createDeck([...slots.values()]);
+  return createHand({
+    seed: 'elimination-fixture',
+    handNumber,
+    players: stacks.map((stack, seat) => ({
+      id: seat ? `bot-${seat}` : 'hero',
+      name: seat ? `Bot ${seat}` : 'You',
+      stack,
+    })),
+    buttonSeat: 0,
+    smallBlind: 0.5,
+    bigBlind: 1,
+    deck: Array.from({ length: 52 }, (_, index) => slots.get(index) ?? remaining.shift()!),
+  });
+}
+
 beforeEach(() => {
   vi.stubGlobal('localStorage', memoryStorage());
   reset();
@@ -69,6 +129,210 @@ afterEach(() => {
 });
 
 describe('persisted full-hand table sessions', () => {
+  it.each([2, 3, 6] as const)(
+    'declares one winner and records simultaneous eliminations at a %i-seat table',
+    async (playerCount) => {
+      vi.spyOn(agents, 'chooseAgentAction').mockImplementation(shoveAction);
+      const state = useTableStore.getState();
+      expect(state.startSession({ playerCount, autoRebuy: true }, `winner-${playerCount}`)).toBe(
+        true,
+      );
+      useTableStore.setState({ currentHand: riggedHand(Array(playerCount).fill(100)) });
+      for (let guard = 0; !useTableStore.getState().session?.endedAt && guard < 10; guard += 1) {
+        const next = useTableStore.getState();
+        const hand = next.currentHand!;
+        if (hand.actorId === 'hero') {
+          const action = getLegalActions(hand).find((option) => option.type === 'raise');
+          expect(
+            next.submitHero(
+              action ? { type: 'raise', amount: action.maxAmount } : { type: 'call' },
+              decisionToken(hand),
+            ),
+          ).toBe(true);
+        } else expect(next.fastForward(decisionToken(hand))).toBe(true);
+      }
+      const completed = useTableStore.getState();
+      expect(completed.error).toBeNull();
+      expect(completed.session).toMatchObject({
+        winnerId: 'bot-1',
+        endedReason: 'winner',
+        handsCompleted: 1,
+      });
+      expect(completed.session?.endedAt).not.toBeNull();
+      expect(completed.session?.eliminations).toHaveLength(playerCount - 1);
+      expect(
+        completed.session?.eliminations.every(
+          (entry) => entry.place === 2 && entry.handNumber === 1,
+        ),
+      ).toBe(true);
+      expect(completed.currentHand?.players[1].stack).toBe(playerCount * 100);
+      expect(completed.nextHand(decisionToken(completed.currentHand))).toBe(false);
+      expect(completed.fastForward(decisionToken(completed.currentHand))).toBe(false);
+      completed.resume();
+      expect(useTableStore.getState().paused).toBe(true);
+      await useTableStore.persist.rehydrate();
+      expect(useTableStore.getState().session).toEqual(completed.session);
+      expect(useTableStore.getState().totals.hands).toBe(1);
+      expect(useTableStore.getState().config.autoRebuy).toBe(false);
+    },
+  );
+
+  it('keeps an eliminated hero out while remaining opponents play heads-up to a winner', async () => {
+    const policy = vi.spyOn(agents, 'chooseAgentAction').mockImplementation(passiveAction);
+    useTableStore
+      .getState()
+      .startSession({ playerCount: 3, feedbackTiming: 'session-review' }, 'spectate-final');
+    useTableStore.setState({ currentHand: riggedHand([10, 100, 100]) });
+    let state = useTableStore.getState();
+    expect(state.submitHero({ type: 'raise', amount: 10 }, decisionToken(state.currentHand))).toBe(
+      true,
+    );
+    // Zero chips behind an all-in bet does not yet mean eliminated.
+    await useTableStore.persist.rehydrate();
+    state = useTableStore.getState();
+    expect(state.session?.eliminations).toEqual([]);
+    expect(state.fastForward(decisionToken(state.currentHand))).toBe(true);
+    state = useTableStore.getState();
+    expect(state.session?.eliminations).toEqual([{ playerId: 'hero', handNumber: 1, place: 3 }]);
+    expect(state.session?.endedAt).toBeNull();
+    expect(canRevealHandRecord(state.config, state.hands[0], state.session)).toBe(false);
+    const completedToken = decisionToken(state.currentHand);
+    expect(state.nextHand(completedToken)).toBe(true);
+    expect(useTableStore.getState().nextHand(completedToken)).toBe(false);
+    state = useTableStore.getState();
+    expect(state.currentHand?.players[0]).toMatchObject({
+      stack: 0,
+      startingStack: 0,
+      holeCards: [],
+      status: 'folded',
+    });
+    expect(state.currentHand?.players.filter((player) => player.startingStack > 0)).toHaveLength(2);
+    expect(state.currentHand?.smallBlindSeat).toBe(state.currentHand?.buttonSeat);
+    expect(state.submitHero({ type: 'fold' }, decisionToken(state.currentHand))).toBe(false);
+    await useTableStore.persist.rehydrate();
+    expect(useTableStore.getState().currentHand?.players[0].startingStack).toBe(0);
+    policy.mockImplementation(shoveAction);
+    for (let guard = 0; !useTableStore.getState().session?.endedAt && guard < 20; guard += 1) {
+      state = useTableStore.getState();
+      if (state.currentHand?.result)
+        expect(state.nextHand(decisionToken(state.currentHand))).toBe(true);
+      else expect(state.fastForward(decisionToken(state.currentHand))).toBe(true);
+    }
+    state = useTableStore.getState();
+    expect(state.session?.endedReason).toBe('winner');
+    expect(['bot-1', 'bot-2']).toContain(state.session?.winnerId);
+    expect(state.session?.eliminations).toHaveLength(2);
+    expect(state.session?.eliminations.find((entry) => entry.playerId === 'hero')?.place).toBe(3);
+    expect(state.currentHand?.players[0].startingStack).toBe(0);
+    expect(state.session?.decisions).toBe(1);
+    expect(canRevealHandRecord(state.config, state.hands[0], state.session)).toBe(true);
+  });
+
+  it('fast-forwards only opponents and rejects paused, stale and repeated requests', () => {
+    vi.spyOn(agents, 'chooseAgentAction').mockImplementation(passiveAction);
+    useTableStore.getState().startSession({ playerCount: 6 }, 'fast-forward-boundary');
+    const initial = useTableStore.getState().currentHand!;
+    const token = decisionToken(initial);
+    useTableStore.getState().pause();
+    expect(useTableStore.getState().fastForward(token)).toBe(false);
+    useTableStore.getState().resume();
+    expect(useTableStore.getState().fastForward(token)).toBe(true);
+    const heroTurn = useTableStore.getState().currentHand!;
+    expect(heroTurn.actorId).toBe('hero');
+    expect(heroTurn.board).toEqual([]);
+    expect(useTableStore.getState().decisions).toEqual([]);
+    expect(useTableStore.getState().fastForward(token)).toBe(false);
+    expect(useTableStore.getState().fastForward(decisionToken(heroTurn))).toBe(false);
+    expect(useTableStore.getState().currentHand!.events).toEqual(heroTurn.events);
+    expect(useTableStore.getState().submitHero({ type: 'fold' }, decisionToken(heroTurn))).toBe(
+      true,
+    );
+    const foldedToken = decisionToken(useTableStore.getState().currentHand);
+    expect(useTableStore.getState().fastForward(foldedToken)).toBe(true);
+    const finished = useTableStore.getState();
+    expect(finished.currentHand?.result).not.toBeNull();
+    expect(finished.session?.handsStarted).toBe(1);
+    expect(finished.decisions).toHaveLength(1);
+    finished.pause();
+    expect(useTableStore.getState().nextHand(decisionToken(finished.currentHand))).toBe(false);
+    finished.resume();
+    expect(useTableStore.getState().nextHand(decisionToken(finished.currentHand))).toBe(true);
+    expect(useTableStore.getState().nextHand(decisionToken(finished.currentHand))).toBe(false);
+  });
+
+  it('ranks simultaneous busts by entering stacks and migrates a legacy save without rebuys', async () => {
+    vi.spyOn(agents, 'chooseAgentAction').mockImplementation(shoveAction);
+    useTableStore.getState().startSession({ playerCount: 3 }, 'legacy-elimination');
+    useTableStore.setState({ currentHand: riggedHand([10, 100, 20]) });
+    const hand = useTableStore.getState().currentHand!;
+    expect(
+      useTableStore.getState().submitHero({ type: 'raise', amount: 10 }, decisionToken(hand)),
+    ).toBe(true);
+    expect(
+      useTableStore.getState().fastForward(decisionToken(useTableStore.getState().currentHand)),
+    ).toBe(true);
+    expect(useTableStore.getState().session?.eliminations).toEqual([
+      { playerId: 'hero', handNumber: 1, place: 3 },
+      { playerId: 'bot-2', handNumber: 1, place: 2 },
+    ]);
+    const raw = JSON.parse(localStorage.getItem(TABLE_STORAGE_KEY)!);
+    delete raw.state.session.winnerId;
+    delete raw.state.session.eliminations;
+    delete raw.state.session.endedReason;
+    raw.state.session.endedAt = null;
+    raw.state.config.autoRebuy = true;
+    localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(raw));
+    await useTableStore.persist.rehydrate();
+    const restored = useTableStore.getState();
+    expect(restored.config.autoRebuy).toBe(false);
+    expect(restored.session?.winnerId).toBe('bot-1');
+    expect(restored.session?.endedReason).toBe('winner');
+    expect(restored.session?.eliminations).toHaveLength(2);
+    expect(restored.totals.hands).toBe(1);
+    expect(restored.nextHand()).toBe(false);
+  });
+
+  it('records a hand that runs out immediately from an all-in blind exactly once', async () => {
+    useTableStore.getState().startSession({ playerCount: 2 }, 'instant-blind-runout');
+    useTableStore.setState({ currentHand: riggedHand([1, 100]) });
+    let state = useTableStore.getState();
+    expect(state.submitHero({ type: 'fold' }, decisionToken(state.currentHand))).toBe(true);
+    state = useTableStore.getState();
+    expect(state.currentHand?.players[0].stack).toBe(0.5);
+    const firstToken = decisionToken(state.currentHand);
+    expect(state.nextHand(firstToken)).toBe(true);
+    state = useTableStore.getState();
+    expect(state.currentHand?.handNumber).toBe(2);
+    expect(state.currentHand?.result).not.toBeNull();
+    expect(state.currentHand?.events.some((event) => event.type === 'action')).toBe(false);
+    expect(state.hands).toHaveLength(2);
+    expect(state.session).toMatchObject({ handsStarted: 2, handsCompleted: 2, decisions: 1 });
+    expect(state.totals.hands).toBe(2);
+    expect(state.nextHand(firstToken)).toBe(false);
+    await useTableStore.persist.rehydrate();
+    expect(useTableStore.getState().hands).toHaveLength(2);
+    expect(useTableStore.getState().totals.hands).toBe(2);
+    expect(useTableStore.getState().session?.handsCompleted).toBe(2);
+  });
+
+  it('leaves an unfinished match without awarding a winner or inventing a completed hand', () => {
+    useTableStore.getState().startSession({ playerCount: 3 }, 'leave-match');
+    expect(useTableStore.getState().startSession({ playerCount: 2 })).toBe(false);
+    useTableStore.getState().endSession();
+    const left = useTableStore.getState();
+    expect(left.session).toMatchObject({ endedReason: 'left', winnerId: null, handsCompleted: 0 });
+    expect(left.hands).toEqual([]);
+    expect(left.totals.hands).toBe(0);
+    left.resume();
+    expect(useTableStore.getState().paused).toBe(true);
+    expect(left.fastForward(decisionToken(left.currentHand))).toBe(false);
+    expect(left.startSession({ playerCount: 2 })).toBe(true);
+    expect(useTableStore.getState().session).toMatchObject({
+      endedReason: null,
+      winnerId: null,
+      eliminations: [],
+    });
+  });
   it('keeps independent policy randomness reproducible across refresh without passing a deck seed', async () => {
     const spy = vi.spyOn(agents, 'chooseAgentAction');
     useTableStore.getState().startSession({ playerCount: 6 }, 'private-deck-master');
@@ -155,8 +419,9 @@ describe('persisted full-hand table sessions', () => {
     expect(useTableStore.getState().stepBot(token)).toBe(false);
   });
 
-  it('continues beyond retained history, rotates buttons, rebuys and preserves saved full replay data', async () => {
+  it('continues beyond retained history, rotates buttons, carries stacks and preserves saved full replay data', async () => {
     useTableStore.getState().startSession({ playerCount: 2, autoRebuy: true }, 'unlimited-hands');
+    expect(useTableStore.getState().config.autoRebuy).toBe(false);
     finishHand();
     const first = useTableStore.getState().hands[0];
     const savedId = useTableStore.getState().saveHand(first.id)!;
@@ -166,11 +431,14 @@ describe('persisted full-hand table sessions', () => {
       marked: true,
     });
     for (let index = 1; index < RECENT_HAND_LIMIT + 5; index += 1) {
-      const oldButton = useTableStore.getState().currentHand!.buttonSeat;
+      const previous = useTableStore.getState().currentHand!;
+      const oldButton = previous.buttonSeat;
       expect(useTableStore.getState().nextHand()).toBe(true);
       const next = useTableStore.getState().currentHand!;
       expect(next.buttonSeat).toBe((oldButton + 1) % 2);
-      expect(next.players.every((player) => player.startingStack >= 100)).toBe(true);
+      expect(next.players.map((player) => player.startingStack)).toEqual(
+        previous.players.map((player) => player.stack),
+      );
       finishHand();
     }
     const state = useTableStore.getState();
@@ -276,5 +544,22 @@ describe('persisted full-hand table sessions', () => {
     expect(data.hands[0].state).not.toHaveProperty('deck');
     useTableStore.getState().clearProgress();
     expect(useTableStore.getState().config.feedbackTiming).toBe('instant');
+  });
+
+  it('rebuilds each unique decision once when current, recent and notebook history overlap', async () => {
+    useTableStore.getState().startSession({ playerCount: 2 }, 'restore-deduplication');
+    finishHand();
+    const state = useTableStore.getState();
+    state.saveHand(state.currentHand!.id);
+    const spy = vi.spyOn(analysis, 'analyzeDecision');
+    const raw = JSON.parse(localStorage.getItem(TABLE_STORAGE_KEY)!);
+    raw.state.decisions = [];
+    localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(raw));
+    await useTableStore.persist.rehydrate();
+    const restored = useTableStore.getState();
+    expect(spy).toHaveBeenCalledTimes(state.decisions.length);
+    expect(restored.decisions[0].createdAt).toBeNull();
+    expect(restored.hands[0].decisions[0].createdAt).toBe(state.decisions[0].createdAt);
+    expect(restored.savedHands[0].decisions[0].analysis).toEqual(restored.decisions[0].analysis);
   });
 });
