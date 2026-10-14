@@ -1,0 +1,5 @@
+# Optional, development-only independent poker rules oracle. Python >=3.11.
+# These hashes are the official PyPI 0.7.7 wheel and source distribution.
+pokerkit==0.7.7 \
+    --hash=sha256:4e946cc5c48558a9a4583f3a00f13960bd5b719144643104642031552c59ec76 \
+    --hash=sha256:5df50e9e500467f7335192debbfc4bfc038ab25f5ffdd3fbbdee1771b5814bdb

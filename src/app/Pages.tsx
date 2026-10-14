@@ -18,6 +18,9 @@ import { useGeneratedStore } from '../features/practice/generated-store';
 import type { StreetFilter } from '../features/practice/store';
 import { PlayingCard } from '../components/poker/PlayingCard';
 import { Button, Dialog, EmptyState } from '../components/ui/primitives';
+import { useTableStore } from '../features/table/store';
+import { useSpotNotebook } from '../features/notebook/spot-notebook';
+import type { FeedbackTiming } from '../features/table/types';
 const gradeText = { preferred: 'Preferred', defensible: 'Defensible', mistaken: 'Mistaken' };
 const streets: { value: StreetFilter; label: string }[] = [
   { value: 'all', label: 'Mixed streets' },
@@ -30,10 +33,12 @@ export function ScenarioLibrary({
   onPractice,
   onSource,
   active,
+  hideResults = false,
 }: {
   onPractice: (id: string) => void;
   onSource: () => void;
   active: boolean;
+  hideResults?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [street, setStreet] = useState<StreetFilter>('all');
@@ -107,7 +112,9 @@ export function ScenarioLibrary({
       </div>
       <div className="library-grid">
         {filtered.map((spot, index) => {
-          const last = results.filter((result) => result.scenarioId === spot.id).at(-1);
+          const last = hideResults
+            ? undefined
+            : results.filter((result) => result.scenarioId === spot.id).at(-1);
           return (
             <button className="scenario-tile" key={spot.id} onClick={() => setSelected(spot)}>
               <div className="tile-header">
@@ -228,6 +235,8 @@ export function SettingsPage({
   onInstall: () => void;
 }) {
   const { settings, updateSettings, clearProgress, results } = useTrainingStore();
+  const table = useTableStore();
+  const notebook = useSpotNotebook();
   const [clearOpen, setClearOpen] = useState(false);
   const [name, setName] = useState(settings.displayName);
   const [saved, setSaved] = useState(false);
@@ -238,7 +247,9 @@ export function SettingsPage({
         JSON.stringify(
           {
             product: BRAND.name,
-            version: 2,
+            version: 3,
+            table: JSON.parse(useTableStore.getState().exportJSON()),
+            notebook: useSpotNotebook.getState().spots,
             generated: {
               results: useGeneratedStore.getState().results,
               sessions: useGeneratedStore.getState().sessions,
@@ -305,6 +316,26 @@ export function SettingsPage({
                 </Button>
               </form>
             </div>
+            <div className="setting-row">
+              <div>
+                <label htmlFor="feedback-timing">Feedback timing</label>
+                <p>
+                  Instant, after the hand, or at session review. Practice spots finish after one
+                  decision.
+                </p>
+              </div>
+              <select
+                id="feedback-timing"
+                value={table.config.feedbackTiming}
+                onChange={(e) =>
+                  table.updateConfig({ feedbackTiming: e.target.value as FeedbackTiming })
+                }
+              >
+                <option value="instant">Instant feedback</option>
+                <option value="full-hand">After each full hand</option>
+                <option value="session-review">At session review</option>
+              </select>
+            </div>
             {[
               {
                 key: 'animations' as const,
@@ -345,7 +376,10 @@ export function SettingsPage({
             <div className="setting-row">
               <div>
                 <strong>Export your progress</strong>
-                <p>Download a JSON copy of your decisions, sessions, and preferences.</p>
+                <p>
+                  Download decisions, full hand histories, notebook notes, sessions, and
+                  preferences.
+                </p>
               </div>
               <Button variant="secondary" onClick={exportProgress}>
                 <ArrowDownToLine size={15} />
@@ -355,7 +389,10 @@ export function SettingsPage({
             <div className="setting-row">
               <div>
                 <strong>Start with a clean slate</strong>
-                <p>Remove local practice history. Your preferences stay.</p>
+                <p>
+                  Remove practice history, table sessions, and your saved notebook. Your preferences
+                  stay.
+                </p>
               </div>
               <Button variant="danger" onClick={() => setClearOpen(true)}>
                 <Trash2 size={15} />
@@ -370,8 +407,8 @@ export function SettingsPage({
           </span>
           <h3>Made for the work.</h3>
           <p>
-            FeltLab is a focused heads-up decision trainer. No money, no accounts, just room to
-            improve.
+            FeltLab is a complete poker practice space: full AI tables, focused decisions, visual
+            replays, and a private study notebook.
           </p>
           <button onClick={onSource}>
             <ShieldCheck size={16} />
@@ -398,7 +435,7 @@ export function SettingsPage({
         open={clearOpen}
         onOpenChange={setClearOpen}
         title="Reset your practice history?"
-        description={`This removes ${results.length + useGeneratedStore.getState().results.length} recorded decisions and your session history from this browser. This cannot be undone. Export a copy first if you want to keep it.`}
+        description={`This removes ${results.length + useGeneratedStore.getState().results.length} practice decisions, ${table.hands.length} recent full hands, ${table.savedHands.length + notebook.spots.length} notebook entries, and your session history from this browser. This cannot be undone. Export a copy first if you want to keep it.`}
       >
         <div className="dialog-actions">
           <Button variant="secondary" onClick={() => setClearOpen(false)}>
@@ -409,6 +446,8 @@ export function SettingsPage({
             onClick={() => {
               clearProgress();
               useGeneratedStore.getState().clearProgress();
+              table.clearProgress();
+              notebook.clear();
               setClearOpen(false);
             }}
           >

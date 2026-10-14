@@ -1,6 +1,6 @@
-﻿# FeltLab V2
+﻿# FeltLab V3
 
-A responsive, local-first heads-up poker decision trainer with endless procedural practice. There is no money, account, backend, or paid API.
+A local-first poker training app with complete no-limit Hold'em, distinct AI opponents, visual hand replay, a study notebook, and the preserved V2 practice room. No money, accounts, backend, or paid service is required.
 
 ## Run
 
@@ -11,60 +11,62 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open the URL Vite prints. Use `npm` instead of `npm.cmd` on macOS/Linux. A production build is served with:
+Open the URL printed by Vite. On macOS/Linux use `npm` instead of `npm.cmd`. Production:
 
 ```powershell
 npm.cmd run build
 npm.cmd run preview
 ```
 
-## What you can practice
+## Play and study
 
-- **Endless:** fresh seeded hands until you choose to finish.
-- **Focused:** supported streets and concepts, opponent profiles, and difficulty.
-- **Challenge:** 10, 20, or 50 decisions with a source-aware review.
-- **Weakness:** targets the highest observed mathematical concept error rate from your saved first attempts.
-- **Spot library:** the original 16 curated scenarios remain available individually.
+- **AI poker table:** complete 2-, 3-, and 6-player hands, default six seats and 100 BB. Configure blinds, stack depth, difficulty, opponent profiles, pace, and rebuy behavior. Fold, check, call, bet, or raise with legal bounds, a slider, pot presets, and all-in. Continue to the next hand with rotating positions and carried stacks.
+- **Practice room:** preserved endless, focused, weakness, and 10/20/50-decision challenges, plus 16 original curated spots. Mathematical drills and supported generated spots continue offline in a worker.
+- **Visual replay:** play/pause, speed, previous/next action, scrubbing, and street jumps. Reconstruct actual table state; future board cards and unrevealed opponents stay hidden. Practice spots replay their recorded history up to the decision.
+- **Hand notebook:** save completed hands or practice spots; add notes, tags, and review marks; filter and replay them later.
+- **Range explorer:** a keyboard-accessible 13×13 view of the existing authored heads-up open/three-bet models. Weights are range membership assumptions, not GTO action frequencies.
+- **Progress:** completed-hand reviews, actual decision counts, supported model agreement and coverage, street comparisons, targeted practice, and the preserved mathematical drill history.
 
-Choose a mode, optionally customize, then select **Start Training**. On phones, the table has persistent action controls and a separate analysis sheet. On desktop, analysis sits alongside the table. Number keys choose answers; Enter advances. Replays reveal feedback while preserving the first recorded attempt.
+Feedback can appear instantly, after a hand, or at session review. Deferred sessions suppress analysis, hints, and scores in table/practice/progress/notebook views until review. Change timing in Settings or table setup. Practice spots contain one decision, so after-hand feedback appears after that decision. AI actions stop when the table page is not mounted; pause explicitly before reviewing a live hand.
 
-## Strategy, honestly
+Keyboard shortcuts: F folds, C checks/calls, B bets, R raises, or 1–3 choose table actions at the selected size. Inputs and dialogs suppress action shortcuts. In practice, number keys choose an answer and Enter advances. The first attempt stays recorded when trying another line.
 
-| Training family       | Evaluation                                                                                               | Scored?                         |
-| --------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| River call/fold       | Exact weighted equity and incremental EV against a displayed finite range; no rake, calling ends betting | Yes, under that model           |
-| Pot odds              | `call / (current pot + call)`                                                                            | Yes                             |
-| Draw probabilities    | Exact chance to hit a specified set of direct outs in one or two cards                                   | Yes; this is not winning equity |
-| Bluff mathematics     | Hypothetical zero-equity bluff break-even threshold                                                      | Yes                             |
-| Generated preflop     | Authored heads-up weighted ranges and structural hand-strength heuristics                                | Educational guidance only       |
-| Original curated pack | Explicit illustrative judgments                                                                          | Educational guidance only       |
+## Poker correctness and opponents
 
-**No verified solver pack or verified heads-up range chart is shipped.** Mathematical accuracy measures answers within stated assumptions; it is not a GTO score. There are no invented solver EV losses or strategy frequencies. River EV loss is only reported where the terminal model supports the calculation.
+The native typed engine handles legal action order, heads-up button rules, multiway rounds, short all-ins and reopening, returned uncalled bets, side pots, ties, odd chips, fold wins, showdown, and chip conservation. With auto-rebuy disabled, busted opponents sit out; fewer than two funded seats or a busted hero require a new session. Real hands can end before showdown. Reopening uses a documented TDA-style full-wager house policy; one below-minimum opening all-in case differs from PokerKit (see the external-tools record). The authoritative event history supports reconstruction and local recovery.
 
-Profiles are **Baseline model** (default), **Tight**, **Aggressive**, and **Recreational**. They define consistent range assumptions. They are not full-hand poker bots. Full heads-up gameplay is deferred pending a complete, separately validated game state machine and policy.
+Six operational profiles use public state and their own cards: **Balanced**, **Tight-aggressive**, **Loose-aggressive**, **Passive**, **Tricky**, and **Exploitative**. The last uses observed public actions with minimum-sample safeguards. Beginner, intermediate, advanced, and expert change policy simplifications, not the legality of play. These are authored stochastic policies, not trained neural agents or verified GTO opponents. See [Poker AI](docs/POKER_AI.md) for the mechanisms and measured benchmark uncertainty.
 
-## Generation and architecture
+## Analysis without invented certainty
 
-React, TypeScript, Vite, Radix, Motion, Zustand, and a PWA service worker power the app. Assets and fonts are local. The engine is separated into cards, mathematics, weighted ranges, equity, betting rules, and seeded scenario generation.
+Every hero action records its information set before acting, chosen action, street, legal options, source, assumptions, and confidence. Reviews separate practice-chip outcomes from decision quality.
 
-A seed plus street/category/profile/difficulty reproduces a scenario. Generators construct legal histories, derive pots and stacks from those histories, and validate every scenario before returning it. Card uniqueness, street lengths, turn order, minimum raises, and stack accounting are checked. The river model builds a finite range from public board information, then removes hero-blocked combinations when calculating equity. It does not select opponent weights by peeking at hero cards.
+| Analysis                                                        | Meaning                                                                                      |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Full-hand model agreement                                       | Agreement with an authored reference policy in supported states; never a GTO or EV score     |
+| Unsupported multiway postflop, all-in or out-of-model decisions | Qualitative guidance and applicable arithmetic, with no numeric strategy grade               |
+| Pot odds                                                        | Exact immediate, contribution-cap-aware call price; not an estimate of winning equity        |
+| V2 river drills                                                 | Exact enumeration and terminal call EV against the explicitly supplied finite weighted range |
+| V2 math drills                                                  | Explicit pot-odds, direct-outs, and hypothetical bluff formulas                              |
+| Curated/generated preflop coaching                              | Authored educational guidance, excluded from mathematical accuracy                           |
 
-Expensive generation runs in a cancellable **Web Worker** with a bounded timeout. The UI reports failures and offers a same-seed retry. Browser reload rebuilds the current scenario from its seed rather than trusting saved answer data.
+A full-hand number requires at least **75% decision-count coverage and 75% importance coverage**, with no unsupported major decision. Supported decisions are weighted by confidence × decision importance. Insufficient coverage displays **unavailable**. Numerical strategy EV loss and solver frequencies are not invented. No solver-backed strategy pack is shipped. See [Strategy scoring](docs/STRATEGY_SCORING.md).
 
-The integrated hand evaluator is **`pokersolver@2.1.4`**, MIT licensed, with no runtime dependencies. Its exact notice is preserved at [`public/licenses/pokersolver-2.1.4-MIT.txt`](public/licenses/pokersolver-2.1.4-MIT.txt) and linked in Settings. Integration is covered by known-hand, tie, blocker, weighted-equity, and independent reference tests. Research decisions for PokerKit, Poker Practice, Free GTO, Noam Brown’s solver, poker-evaluator, and TexasSolver are documented below.
+## Tools actually integrated
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Poker engine research and licensing](docs/POKER_ENGINE_RESEARCH.md)
-- [Strategy accuracy and limits](docs/STRATEGY_ACCURACY.md)
-- [Next milestones](docs/NEXT_STEPS.md)
+- **pokersolver 2.1.4 (MIT):** existing runtime hand evaluator, now used for complete-hand showdown settlement. Its exact [license notice](public/licenses/pokersolver-2.1.4-MIT.txt) remains shipped and linked in Settings.
+- **PokerKit 0.7.7 (MIT):** optional development oracle with a pinned wheel hash. A runnable independent pipeline validates legal actions, actor order, stacks and settlement, and exports/reloads PHH histories. It is not downloaded or run in the browser.
+- **Native event engine and typed policy/analysis boundaries:** keep local play independent of external services. A types-only, server-side GTO Wizard Score adapter contract is prepared but inactive.
 
-## Progress and recovery
+The `poker-engine-ts` candidate was executed and browser-bundled, then deferred after evaluating the seat/replay adapter requirements. OpenSpiel, RLCard, Free GTO, Noam Brown's river solver, official GTO Wizard products, and additional candidates were researched using primary sources. No protected data was scraped, no unlicensed solver output copied, and no paid API enabled. [V3 external tools](docs/V3_EXTERNAL_TOOLS.md) records exact decisions, limitations, licenses, and the PokerKit commands.
 
-Legacy progress remains in `feltlab-training-v1`. Generated training uses a separate versioned `feltlab-generated-v2` entry, so the upgrade preserves existing history and preferences. The app validates saved records, deduplicates attempts, reconstructs the active generated scenario, and excludes heuristic decisions from math accuracy. Progress shows streets, concepts, opponent models, observed trends, session summaries, and missed categories.
+## Persistence and recovery
 
-The latest **2,000 generated attempts** and **200 generated session summaries** are retained to bound browser storage. Long-running sessions continue beyond these limits; older detailed attempts eventually leave the retained window. Settings exports a JSON backup of both histories and preferences. Import and cross-device synchronization are not implemented. Reset removes histories while retaining preferences. Blocked or full storage produces a visible notice and practice continues in memory. Clearing browser/site data removes local history.
+V1/V2 keys (`feltlab-training-v1`, `feltlab-generated-v2`) are preserved. V3 adds `feltlab-table-v3` for reconstructed live/history state and `feltlab-notebook-v3` for saved spots. Loading validates authoritative histories and rebuilds analysis. Invalid records are discarded independently rather than trusted.
 
-A V1 source checkpoint was saved before V2 implementation in `checkpoints/feltlab-v1-before-v2.zip` (ignored by Git). It excludes dependencies, build output, and user IDE settings.
+Retention is bounded: 60 recent complete hands, 100 saved full hands, 30 saved spots, 2,000 generated attempts, and 200 generated session summaries. Lifetime activity counters survive recent-hand retention; coaching trends use retained records and label this scope. Save important hands before they leave recent history; a full hand notebook refuses further saves instead of silently replacing entries. Saved spots retain the newest 30. Notes stay local. Settings exports a JSON copy of all histories, notes and preferences. Import and cross-device sync remain future work. Reset requires confirmation and removes history/notebook entries while retaining preferences.
+
+Full or blocked browser storage produces a visible notice and play continues in memory. Clearing site data removes local history. A V2 source checkpoint was created before this upgrade at `checkpoints/feltlab-v2-before-v3.zip` (ignored by Git); the earlier V1 checkpoint remains.
 
 ## Validation
 
@@ -77,16 +79,24 @@ npm.cmd run test:e2e
 npm.cmd run test:pwa
 ```
 
-Unit tests include at least **10,000 seeded generated scenarios**, deterministic regeneration, independent seven-card hand comparison, poker mathematics, legal betting histories, corruption handling, worker cancellation/timeouts, and session persistence. Browser tests exercise a **100-decision endless session**, replay, reload, focus filters, challenge completion, library, settings, exports, and navigation.
+The unit suite includes **10,000 complete seeded hands across 2/3/6-player formats**, every-hand exact history reconstruction, chip conservation, betting edge cases, private-card boundaries, and the preserved 10,000 generated-scenario suite. The independent PokerKit pipeline covers **600 complete hands, 6,294 decisions, and 600 PHH round trips**. It caught a dry-side-pot raising defect during development; the fix has a regression test. These finite checks provide evidence, not a mathematical proof of all poker states.
 
-Responsive browser checks and screenshots cover **320, 360, 375, 390, 430, 768, 1024, and 1440px**, plus landscape. Geometry checks detect card-symbol intersections and horizontal overflow; screenshots are also inspected visually. Artifacts and failure traces go to `test-results/`.
-
-Playwright configurations use installed **Microsoft Edge** (`channel: 'msedge'`). To use Playwright-managed Chromium, remove the `channel` property in both Playwright configs and run `npx.cmd playwright install chromium`. Tests start their servers automatically. Build before `test:pwa`.
+Browser tests exercise complete play, continuing hands, replay, saved notes, refresh, deferred feedback, ranges, the preserved 100-decision endless flow, mobile geometry, and offline operation. See [Testing](docs/TESTING.md) for final run results and limits. Artifacts are generated under ignored `test-results/`. Playwright uses installed Microsoft Edge; change `channel` in the configs and install Chromium if needed. Test servers are started automatically. Build before running the PWA suite.
 
 ## PWA and iPhone
 
-The production app includes a standalone manifest, standard and maskable icons, an Apple touch icon, safe-area styles, reduced-motion support, and cached worker/evaluator bundles. Load it online once and allow service-worker installation before using offline practice. Development mode does not provide production caching. Updates show an explicit refresh prompt.
+Fonts, card assets, worker and application bundles are local. The production app has a manifest, standard/maskable icons, Apple touch icon, safe-area styles, reduced-motion handling, and offline caching after its first online load. Development mode does not offer production caching. Updates show an explicit refresh prompt.
 
-Host `dist/` over **HTTPS**. On iPhone Safari, choose **Share → Add to Home Screen**. A computer’s localhost URL is not reachable from your phone, and an ordinary HTTP LAN URL is insufficient for installation/offline behavior. No App Store deployment is needed.
+Host `dist/` over HTTPS, then on iPhone Safari use **Share → Add to Home Screen**. A computer's localhost URL is not reachable from your phone. Physical iPhone Safari, notch/browser toolbar behavior, and installed-device checks remain a release check; desktop emulation does not establish device-specific correctness.
 
-Automated browser layouts and offline operation are tested locally. Physical iPhone Safari, actual notch/toolbar behavior, and installed-device testing remain a release check; desktop browser emulation does not prove those device-specific behaviors.
+## Documentation and next work
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Poker AI and benchmark](docs/POKER_AI.md)
+- [Scoring method and coverage](docs/STRATEGY_SCORING.md)
+- [Visual hand replay](docs/HAND_REPLAY.md)
+- [External tools and licensing](docs/V3_EXTERNAL_TOOLS.md)
+- [Testing](docs/TESTING.md)
+- [V4 roadmap](docs/V4_ROADMAP.md)
+
+What If branches, a validated solver pack, paid remote analysis, LLM commentary, accounts/sync, arbitrary hand-history import, and research-trained agents are not implemented. The highest-value next step is a small reproducible heads-up river solver pack with independent convergence checks and strict state matching, while preserving honest unsupported states.

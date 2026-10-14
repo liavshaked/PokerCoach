@@ -1,7 +1,7 @@
 {
   "name": "feltlab",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -14,7 +14,8 @@
     "test:pwa": "playwright test --config playwright.pwa.config.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:oracle:export": "node scripts/export-pokerkit-fixtures.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "5.3.0",

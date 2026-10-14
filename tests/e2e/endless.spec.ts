@@ -152,10 +152,15 @@ test('mobile analysis, navigation, cards and modals fit every requested width', 
   await page.screenshot({ path: 'test-results/feltlab-v2-landscape.png', fullPage: true });
   await page.setViewportSize({ width: 320, height: 568 });
   for (const label of ['Spot library', 'Your progress', 'Settings']) {
-    await page
-      .getByRole('navigation', { name: 'Mobile navigation' })
-      .getByRole('button', { name: label, exact: true })
-      .click();
+    if (label === 'Your progress')
+      await page
+        .getByRole('navigation', { name: 'Mobile navigation' })
+        .getByRole('button', { name: label, exact: true })
+        .click();
+    else {
+      await page.getByRole('button', { name: 'More pages' }).click();
+      await page.getByRole('dialog').getByRole('button', { name: label, exact: true }).click();
+    }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );

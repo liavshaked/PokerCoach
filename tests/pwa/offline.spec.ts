@@ -31,5 +31,18 @@ test('production manifest, install icons, service worker and offline practice', 
   await expect(page.locator('.poker-action').first()).toBeVisible();
   await page.locator('.poker-action').first().click();
   await expect(page.locator('.decision-grade')).toBeVisible();
+  await page.goto('/#table');
+  await page.getByRole('button', { name: 'Heads-up', exact: true }).click();
+  await page.getByRole('button', { name: 'Take a seat', exact: true }).click();
+  await page
+    .locator('.table-action-buttons')
+    .getByRole('button', { name: 'Fold', exact: true })
+    .click();
+  await expect(page.locator('.live-pot')).toContainText('HAND COMPLETE');
+  await page.getByRole('button', { name: 'Save hand', exact: true }).click();
+  await page.goto('/#notebook');
+  await expect(page.locator('.notebook-card')).toHaveCount(1);
+  await page.goto('/#ranges');
+  await expect(page.locator('.range-cell')).toHaveCount(169);
   await context.setOffline(false);
 });

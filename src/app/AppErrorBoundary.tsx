@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { useTableStore } from '../features/table/store';
 import { useTrainingStore } from '../features/practice/store';
 import { useGeneratedStore } from '../features/practice/generated-store';
 
@@ -13,6 +14,7 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, { faile
   recover = () => {
     useTrainingStore.getState().endSession();
     useGeneratedStore.getState().closeSession();
+    useTableStore.getState().pause();
     window.location.hash = 'practice';
     this.setState({ failed: false });
   };

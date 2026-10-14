@@ -14,7 +14,8 @@ export default defineConfig({
         id: '/',
         name: 'FeltLab — Poker decision trainer',
         short_name: 'FeltLab',
-        description: 'Sharpen your heads-up poker decisions with transparent coaching.',
+        description:
+          'Play complete poker hands, replay your decisions, and build better instincts.',
         theme_color: '#111716',
         background_color: '#111716',
         display: 'standalone',
@@ -37,6 +38,20 @@ export default defineConfig({
       },
     }),
   ],
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'ui-framework',
+              test: /[\\/]node_modules[\\/](react|react-dom|scheduler|@radix-ui|motion|framer-motion|motion-dom|motion-utils)([\\/]|$)/,
+            },
+          ],
+        },
+      },
+    },
+  },
   test: { environment: 'node', include: ['src/**/*.test.ts'], clearMocks: true },
 });
